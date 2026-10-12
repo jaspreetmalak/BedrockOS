@@ -1,0 +1,50 @@
+{
+  "commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+  "files": [
+    {
+      "path": "drivers/net/wireless/realtek/rtw89/fw.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/realtek/rtw89/fw.c",
+      "sha256": "b6ad20e754745f39371203b48ecd0bc54c0b867da6802e50b8f517628a0d71ee"
+    },
+    {
+      "path": "drivers/net/wireless/realtek/rtw89/fw.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/realtek/rtw89/fw.h",
+      "sha256": "26422c8bb03fa2d414b138b81e8c7769b02b0f1b42814ee49ea5c09d07bb0aac"
+    },
+    {
+      "path": "drivers/net/wireless/realtek/rtw89/core.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/realtek/rtw89/core.h",
+      "sha256": "8b7e831bda6ca201d826c2b54b0d5ab6ebb461b792b603df0c231a8e8520fe29"
+    },
+    {
+      "path": "drivers/net/wireless/realtek/rtw89/rtw8852ae.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/realtek/rtw89/rtw8852ae.c",
+      "sha256": "15ca947615ebda41ecd1d93c3844a885962f93afc0f49b3f5088de896270d5a1"
+    },
+    {
+      "path": "drivers/net/wireless/realtek/rtw89/rtw8852be.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/realtek/rtw89/rtw8852be.c",
+      "sha256": "3186aaa7bf0d815f23fbaaf8ebbf008ec69eb2f6122e82e90ccd0b87a0c5fd4a"
+    },
+    {
+      "path": "drivers/net/wireless/realtek/rtw89/rtw8852ce.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/realtek/rtw89/rtw8852ce.c",
+      "sha256": "80e38a5ced1e28676cea17a3f0cd0746f5105cae11562c53ca82426a0fcaac61"
+    },
+    {
+      "path": "drivers/net/wireless/realtek/rtw89/rtw8852a.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/realtek/rtw89/rtw8852a.c",
+      "sha256": "1eb7c578ff968ba2009da8ab999ea478f78e67a155bcdcd9b79551984d185916"
+    },
+    {
+      "path": "drivers/net/wireless/realtek/rtw89/rtw8852b.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/realtek/rtw89/rtw8852b.c",
+      "sha256": "c8f7f6d7e5912412a42e57ae34c38b5d65e4d7af8df2fd2b9ce09e438dc8a642"
+    },
+    {
+      "path": "drivers/net/wireless/realtek/rtw89/rtw8852c.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/realtek/rtw89/rtw8852c.c",
+      "sha256": "c078e225117c203571b6ad8e52fa149e6e88ea185a1ff3e639876e5d4c80a2a9"
+    }
+  ]
+}

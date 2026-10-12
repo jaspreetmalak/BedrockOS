@@ -1,0 +1,273 @@
+{
+  "tag": "v6.18",
+  "commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+  "files": [
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt7921/pci.c",
+      "sha256": "7491ac54955d8645e90e81336dc30cfb23440f8a506915c118f377ad6e583eee",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt7921/pci.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt7921/pci_mcu.c",
+      "sha256": "6d361df7ec163099c1228982c0756ccd44e8d3885825922258c20cf5927105d2",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt7921/pci_mcu.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt7921/pci_mac.c",
+      "sha256": "da39bca2baf36f056fbc448d3d3cd30918b78f97af58eebe8839f035084d6882",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt7921/pci_mac.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt7921/mcu.c",
+      "sha256": "efa1d8c12b192f11a26aff31362850819ad897549cba546ad18ac3ed37bd72da",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt7921/mcu.h",
+      "sha256": "bd657fcbdee68c76f244b9ffd4ee615857291079acfddc140cfc489205d33eec",
+      "spdx": "/* SPDX-License-Identifier: ISC */",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt7921/mcu.h"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt7921/regs.h",
+      "sha256": "e699696f832eae9d0810b875658bd4e1de38f4b1fa6bcb28303533a75af21a3c",
+      "spdx": "/* SPDX-License-Identifier: ISC */",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt7921/regs.h"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt7921/mt7921.h",
+      "sha256": "c944681230dfbb04b3017fce283d6f361ff0902aa98a79a16cc0c22e69adc903",
+      "spdx": "/* SPDX-License-Identifier: ISC */",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt7921/mt7921.h"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt792x.h",
+      "sha256": "e2ec3ad880911c68e304b93d2346138c19e59c67487dcc073d7882f348421ddb",
+      "spdx": "/* SPDX-License-Identifier: ISC */",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt792x.h"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt792x_regs.h",
+      "sha256": "28cd3c2742001bf0f76534ab620592447e75b988b61dd05b4b7b7e02512b89e5",
+      "spdx": "/* SPDX-License-Identifier: ISC */",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt792x_regs.h"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt792x_core.c",
+      "sha256": "a9e7be6b35b7535f188391bac5748cec70a8ef1b52eb3ff2a1c44abc74ec40d5",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt792x_core.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt792x_dma.c",
+      "sha256": "114d59d6229de1882b3d0674c95a185c8947e36162ddcbfcc4151a0ca1598e1b",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt792x_dma.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.c",
+      "sha256": "cdbd608a8b35563821a0f73f959763a37e775cf8fd8d0b47ad2f7ec7ffa0cbcd",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h",
+      "sha256": "485626db0e5e7b0912ff173ee3450d044d107dda45e499b74799c45cf5f4eef7",
+      "spdx": "/* SPDX-License-Identifier: ISC */",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt76_connac2_mac.h",
+      "sha256": "5cbaf0972b9c16312660397af115484e4af7cff55cfca8b7172c954a3e1930be",
+      "spdx": "/* SPDX-License-Identifier: ISC */",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt76_connac2_mac.h"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/dma.h",
+      "sha256": "78fdc71bd643509bb17742ba75b0403df98f58d03b9eb314aafe848997fdbd99",
+      "spdx": "/* SPDX-License-Identifier: ISC */",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/dma.h"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/dma.c",
+      "sha256": "f499529da982d29042c0f11dd5379e3bea914f5b91d26b2295f25a28c95d6141",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/dma.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mcu.c",
+      "sha256": "1b3bd3877138633a044e7311978cb925e06e611666398f42ebdd5c637980f527",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mcu.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt76.h",
+      "sha256": "13e67b611608426baa6eb816e67778a7ada1a0c917bbd4aab3c341ba01722193",
+      "spdx": "/* SPDX-License-Identifier: ISC */",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt76.h"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt7921/mac.c",
+      "sha256": "c9103976b5023d003d29e582915b8d06327db0436abcf54b6e35f99503ce7329",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt7921/mac.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt76_connac.h",
+      "sha256": "cb56fe5fb228d065c83334541d98687ed2ad6d25a65c754fb580e34fbfeea8b6",
+      "spdx": "/* SPDX-License-Identifier: ISC */",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt76_connac.h"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt76_connac_mac.c",
+      "sha256": "faad43538706fc6651f0a06f687e07fdf1e7b5317127ded4e5e6008d3060faf5",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt76_connac_mac.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt792x_mac.c",
+      "sha256": "e5b5ec2825c65ea5788d5d5127ff2b2d76ea331657fecf4782ae6b41a81e025f",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt792x_mac.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt7921/init.c",
+      "sha256": "009643275921e0f80cf2f3ffc68d9f410234410b4bf082ca13b35839649b0057",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt7921/init.c"
+    },
+    {
+      "path": "drivers/net/wireless/mediatek/mt76/mt7921/main.c",
+      "sha256": "a6b7f234f74792238f4853befe709a31cbd42bc168c9228e2a6a0a6c06594aa3",
+      "spdx": "// SPDX-License-Identifier: ISC",
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/mediatek/mt76/mt7921/main.c"
+    }
+  ],
+  "license": {
+    "path": "LICENSES/deprecated/ISC",
+    "sha256": "cbdf535b99a9f4cb208c5495c6dd9a1f84104d83c03f8f0d98ee7a0c43805388"
+  },
+  "repository": "https://github.com/torvalds/linux",
+  "license_choice": "ISC per-file SPDX; no Linux kernel API bindings or GPL-only source translated",
+  "attribution": [
+    "MediaTek Inc. (2020,2022,2023)",
+    "Felix Fietkau <nbd@nbd.name> (2016)",
+    "Lorenzo Bianconi <lorenzo@kernel.org> (upstream connac helper author)",
+    "Bedrock contributors (2026 modifications)"
+  ],
+  "translations": {
+    "registers.zig": [
+      "mt7921/pci.c",
+      "mt7921/mt7921.h"
+    ],
+    "regs.zig": [
+      "mt7921/regs.h",
+      "mt792x_regs.h"
+    ],
+    "firmware.zig": [
+      "mt76_connac_mcu.h",
+      "mt76_connac_mcu.c"
+    ],
+    "mcu.zig": [
+      "mt76_connac_mcu.h",
+      "mt76_connac_mcu.c",
+      "mt76_connac2_mac.h",
+      "mt7921/mcu.c",
+      "mt7921/pci_mcu.c",
+      "mcu.c"
+    ],
+    "dma.zig": [
+      "dma.h",
+      "dma.c"
+    ],
+    "driver.zig": [
+      "mt7921/pci.c",
+      "mt7921/pci_mcu.c",
+      "mt792x_core.c",
+      "mt792x_dma.c",
+      "mt7921/init.c"
+    ],
+    "mac.zig": [
+      "mt7921/mac.c",
+      "mt7921/mt7921.h",
+      "mt76_connac.h",
+      "mt76_connac2_mac.h",
+      "mt76_connac_mac.c",
+      "mt792x.h"
+    ],
+    "scan.zig": [
+      "mt76_connac_mcu.c",
+      "mt76_connac_mcu.h",
+      "mt76_connac.h",
+      "mt7921/mcu.c",
+      "mt7921/main.c"
+    ],
+    "regulatory.zig": [
+      "mt76_connac_mcu.c",
+      "mt76_connac_mcu.h",
+      "mt7921/mcu.c",
+      "mt7921/mt7921.h",
+      "mt7921/init.c",
+      "mt792x.h"
+    ]
+  },
+  "upstream_semantics_changes": [
+    "Fixed-register ranges are half-open; reject upstream one-past offset.",
+    "Bounds/overflow checks before all firmware slicing and DMA publication.",
+    "Firmware timeout stops further MCU submissions; hardware reset is required instead of submitting a patch-semaphore release on a possibly stalled DMA queue.",
+    "Interrupt delivery stays disabled during this polling-only bring-up port.",
+    "Firmware-ready state is not associated or connected state.",
+    "RX groups, DMA length, raw management flags and TX_FREE token lists are checked before slicing/release.",
+    "Legacy scan request requires explicit caller-approved channels; never selects full bands implicitly.",
+    "Scan operation sequence namespace exhausts at127 instead of wrapping into stale completion identities.",
+    "Transmit supports bounded unencrypted non-QoS three-address station ToDS/EAPOL frames; FromDS/WDS, QoS, fragmentation, protection and extra ordered headers fail before writes.",
+    "Optional owner-generation validation runs before DMA RAM access and after coherency callbacks so copied rings reject retired backing leases; raw callers without a validator retain their borrowed-storage lifetime contract.",
+    "Regulatory domain grants20MHz only, forces DFS NO_IR, rejects world/6GHz initiation and validates conducted-power ceilings from device/board authority.",
+    "Rate power requires all161 caller-supplied signed half-dBm SKU entries and floors negative mBm without exceeding any conducted ceiling; no default calibration or permissive rate table is constructed.",
+    "CLC validates older block/rule extents, selects actual EEPROM encapsulation and exact country, leaves future indices opaque and never silently falls back to world.",
+    "Regulatory sessions pin their owner, preflight the entire policy before I/O, reject non-increasing generations/device epochs, and require independently proved reset after partial submission failure. The submitted stage does not imply firmware acknowledgement or RF readiness."
+  ],
+  "protocol_abi_references": [
+    {
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/include/net/cfg80211.h",
+      "use": "Numerical firmware-visible channel restriction bits only; no implementation or GPL-only source translated."
+    },
+    {
+      "url": "https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/include/net/regulatory.h",
+      "use": "Numerical country-environment enum values only; no implementation translated."
+    }
+  ],
+  "firmware_validation_fixtures": {
+    "repository": "https://gitlab.com/kernel-firmware/linux-firmware",
+    "commit": "afabaf773c4c2e2c841429933a6a084a5af4d14d",
+    "files": [
+      {
+        "path": "mediatek/WIFI_RAM_CODE_MT7922_1.bin",
+        "size": 1231252,
+        "sha256": "d100e5e04c324fc8da6302112d1e0b4fac952286447d2419eabcd8fb0a1f5b93"
+      },
+      {
+        "path": "mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin",
+        "size": 137632,
+        "sha256": "7fc9075d6d54b31e0539734614ca971fa52caf41b642a3000c8a4501591a4d98"
+      },
+      {
+        "path": "LICENSES/LICENCE.mediatek",
+        "size": 561,
+        "sha256": "a90d3f66704d85889945fec5525ea77622549da83aced1aac99828383f8f1805"
+      },
+      {
+        "path": "WHENCE",
+        "size": 509226,
+        "sha256": "f29dcde99b9df60c0a9e322996490d5a16c4f93dde3cc7eb4f5ece8ff3d98fab"
+      }
+    ],
+    "license": "LicenseRef-LICENCE.mediatek; use and redistribution for MediaTek chipsets; firmware must not become GPL/LGPL covered",
+    "embedded": false,
+    "executed_on_hardware": false
+  }
+}

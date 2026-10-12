@@ -1,0 +1,6 @@
+.zig-cache*/
+zig-out*/
+__pycache__/
+*.pdb
+.DS_Store
+Thumbs.db

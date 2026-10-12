@@ -1,0 +1,10 @@
+.{
+    .name = .bedrock_bootloader,
+    .fingerprint = 0xd3a69e4809c27027,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .boot_protocol = .{ .path = "../boot-protocol" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" },
+}

@@ -1,0 +1,1 @@
+.{ .name = .bedrock_network_core, .fingerprint = 0x81005888afc0237f, .version = "0.1.0", .minimum_zig_version = "0.17.0", .dependencies = .{ .networkkit = .{ .path = "../../public/NetworkKit" } }, .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" } }

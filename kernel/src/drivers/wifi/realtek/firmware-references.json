@@ -1,0 +1,30 @@
+{
+  "repository": "https://gitlab.com/kernel-firmware/linux-firmware",
+  "commit": "afabaf773c4c2e2c841429933a6a084a5af4d14d",
+  "files": [
+    {
+      "path": "LICENSES/LICENCE.rtlwifi_firmware.txt",
+      "url": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/afabaf773c4c2e2c841429933a6a084a5af4d14d/LICENSES/LICENCE.rtlwifi_firmware.txt",
+      "size": 2115,
+      "sha256": "a61351665b4f264f6c631364f85b907d8f8f41f8b369533ef4021765f9f3b62e"
+    },
+    {
+      "path": "rtw89/rtw8852a_fw.bin",
+      "url": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/afabaf773c4c2e2c841429933a6a084a5af4d14d/rtw89/rtw8852a_fw.bin",
+      "size": 1428272,
+      "sha256": "7eb1fe457f5a704b7a4f05a66c67cfa6af2f1142566b640c8e402445d04b0159"
+    },
+    {
+      "path": "rtw89/rtw8852b_fw-1.bin",
+      "url": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/afabaf773c4c2e2c841429933a6a084a5af4d14d/rtw89/rtw8852b_fw-1.bin",
+      "size": 1245944,
+      "sha256": "5b68415e3bfe72715d63a70703d4471b04b5475b8ff69cfdc8cdf48233cd5d3a"
+    },
+    {
+      "path": "rtw89/rtw8852c_fw-1.bin",
+      "url": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/afabaf773c4c2e2c841429933a6a084a5af4d14d/rtw89/rtw8852c_fw-1.bin",
+      "size": 2375560,
+      "sha256": "95e4226f7a4c2a506a5ea2bb8b6247842dd12fc312639750881c5bfdec7bbec5"
+    }
+  ]
+}

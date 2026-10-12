@@ -1,0 +1,10 @@
+.{
+    .name = .bedrock_desktop_shell,
+    .fingerprint = 0xc27c4a9235faf053,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .axisui = .{ .path = "../../../frameworks/public/AxisUI" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" },
+}

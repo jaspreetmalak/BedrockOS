@@ -1,0 +1,12 @@
+.{
+    .name = .bedrock_filesystem,
+    .fingerprint = 0x906f34dc5e759b14,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}

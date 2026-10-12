@@ -1,0 +1,11 @@
+.{
+    .name = .bedrock_userspace,
+    .fingerprint = 0x4b17a5e14617b1e9,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .files_app = .{ .path = "apps/files" },
+        .networkkit = .{ .path = "../frameworks/public/NetworkKit" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "runtime", "apps" },
+}

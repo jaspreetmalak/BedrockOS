@@ -1,0 +1,17 @@
+{
+  "commit": "389b9b702cf9018e9a9078ccc4fa8eaae2e054e3",
+  "country_count": 182,
+  "format": 1,
+  "generated_sha256": "25478770e860a08d3628dc389a4d8130234f56ba15c168b7a0985eb7b72dafb6",
+  "license": "ISC",
+  "license_sha256": "678b0df753c86198fc496d1f1033429bbd57f101472132ee7eaaf9f5e0a7fae1",
+  "license_url": "https://kernel.googlesource.com/pub/scm/linux/kernel/git/wens/wireless-regdb/+/389b9b702cf9018e9a9078ccc4fa8eaae2e054e3/LICENSE",
+  "linux_protocol_reference_commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+  "power_conversion": "exact dBm*100; mW -> floor(mBm) with exact rational inequality verification",
+  "preserved_restrictions": "all source rules/flags/WMM references; no NO-INDOOR drop",
+  "repository": "https://kernel.googlesource.com/pub/scm/linux/kernel/git/wens/wireless-regdb",
+  "rule_count": 1016,
+  "source_only_in_cache": true,
+  "source_sha256": "b71c815bd90c284131a27ab5af6fb4951b3580dc8af83345f31fcd34c5cd0581",
+  "source_url": "https://kernel.googlesource.com/pub/scm/linux/kernel/git/wens/wireless-regdb/+/389b9b702cf9018e9a9078ccc4fa8eaae2e054e3/db.txt"
+}

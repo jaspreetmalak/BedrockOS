@@ -1,0 +1,16 @@
+.{
+    .name = .bedrock_kernel,
+    .fingerprint = 0xd3c01b6c0430e4be,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .boot_protocol = .{ .path = "../boot-protocol" },
+        .filesystem = .{ .path = "../filesystem" },
+        .desktop_shell = .{ .path = "../userspace/apps/shell" },
+        .userspace_runtime = .{ .path = "../userspace" },
+        .window_server = .{ .path = "../userspace/services/window-server" },
+        .networkkit = .{ .path = "../frameworks/public/NetworkKit" },
+        .network_core = .{ .path = "../frameworks/private/NetworkCore" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" },
+}

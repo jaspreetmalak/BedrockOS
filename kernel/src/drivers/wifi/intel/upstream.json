@@ -1,0 +1,75 @@
+{
+  "commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+  "files": [
+    {
+      "path": "drivers/net/wireless/intel/iwlwifi/fw/file.h",
+      "sha256": "b61e8a4550cf68c9ff9bddd3d36a8370daf517482db575ca701387ac9f645728",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/intel/iwlwifi/fw/file.h"
+    },
+    {
+      "path": "drivers/net/wireless/intel/iwlwifi/fw/img.h",
+      "sha256": "9870547a9f0295cce421443f429c67538c47dbcb9deb1e3c1dff722eb4002fd5",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/intel/iwlwifi/fw/img.h"
+    },
+    {
+      "path": "drivers/net/wireless/intel/iwlwifi/iwl-drv.c",
+      "sha256": "925b3a37f33dc4fbf0c996b9147d311ab9b72a8331d91f467724f4c57e9da511",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/intel/iwlwifi/iwl-drv.c"
+    },
+    {
+      "path": "drivers/net/wireless/intel/iwlwifi/pcie/drv.c",
+      "sha256": "215922cb1b091c823768e708f055bd5e37e7cef69e64282349822fc21d9ac70b",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/intel/iwlwifi/pcie/drv.c"
+    },
+    {
+      "path": "drivers/net/wireless/intel/iwlwifi/cfg/7000.c",
+      "sha256": "160ae78fbae3e7828449115c7025c2779150871878dc9a018da085864849d857",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/intel/iwlwifi/cfg/7000.c"
+    },
+    {
+      "path": "drivers/net/wireless/intel/iwlwifi/cfg/8000.c",
+      "sha256": "2a8e32882eeb3dc4295a2bce50d47dcd4537c006babc6f9f646ae6bdccce2a05",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/intel/iwlwifi/cfg/8000.c"
+    },
+    {
+      "path": "drivers/net/wireless/intel/iwlwifi/cfg/22000.c",
+      "sha256": "451cbf8ce9c68a4a2d1509720b03bfa1a5433e60b40fc70b1717d4c51d12ef03",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/intel/iwlwifi/cfg/22000.c"
+    },
+    {
+      "path": "LICENSES/preferred/BSD-3-Clause",
+      "sha256": "7a83b1aeb460458db9a4bd521d7f237c45b1650f6e60ea5ffc71e49472454de3",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/LICENSES/preferred/BSD-3-Clause"
+    },
+    {
+      "path": "LICENSES/preferred/GPL-2.0",
+      "sha256": "8780e78a1a737e127f25a65f6d95269bffd36158dc261114de7859b490bfc5aa",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/LICENSES/preferred/GPL-2.0"
+    },
+    {
+      "path": "drivers/net/wireless/intel/iwlwifi/cfg/ax210.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/intel/iwlwifi/cfg/ax210.c",
+      "sha256": "571c6105aa973aac9d31fb32a985c686abc73061a999c3ec587cba7d02a2c6ad"
+    },
+    {
+      "path": "drivers/net/wireless/intel/iwlwifi/cfg/rf-gf.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/intel/iwlwifi/cfg/rf-gf.c",
+      "sha256": "fb1bda4b18c80f39d44d6494f3262d0fe5d90ba42cd556eea4193ec337c1d86c"
+    },
+    {
+      "path": "drivers/net/wireless/intel/iwlwifi/cfg/rf-hr.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/intel/iwlwifi/cfg/rf-hr.c",
+      "sha256": "18dbfac5a1efc0937fad1f21b5333261c0660d09034c44f899d34a0e47917107"
+    },
+    {
+      "path": "drivers/net/wireless/intel/iwlwifi/pcie/gen1_2/trans.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/intel/iwlwifi/pcie/gen1_2/trans.c",
+      "sha256": "e277fcef6b55acf168ce30c51be6288469e7fa528c50b47e7e2368992000ef36"
+    },
+    {
+      "path": "drivers/net/wireless/intel/iwlwifi/pcie/gen1_2/trans-gen2.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/net/wireless/intel/iwlwifi/pcie/gen1_2/trans-gen2.c",
+      "sha256": "3d4fe0526ccb7727021c1a1935dba5e9f42ed5cc8cf5675f58413c66e2551975"
+    }
+  ]
+}
