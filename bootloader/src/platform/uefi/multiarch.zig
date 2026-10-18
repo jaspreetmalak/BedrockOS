@@ -7,8 +7,12 @@ const options = @import("boot_options");
 const memory = @import("uefi_memory");
 const elf = @import("elf_loader");
 const fdt = @import("device_tree");
+const wifi_assets = @import("wifi_assets.zig");
+const driver_assets = @import("driver_assets.zig");
+const app_assets = @import("app_assets.zig");
 const kernel_image = @embedFile("kernel_image");
 const arena_size = 0x200000;
+const kernel_size = 0x400000;
 const map_offset = 0x40000;
 const map_capacity = 0x40000;
 const dtb_offset = 0x80000;
@@ -258,7 +262,7 @@ fn preserveDtbReservations(info: *protocol.BootInfo, discovery: ?*const fdt.Disc
 fn run(comptime Arch: type, bs: *uefi.tables.BootServices, loader: []align(4096) uefi.Page) !noreturn {
     const bits = try Arch.physicalBits();
     const layout = try elf.inspect(kernel_image, Arch.cpu_arch);
-    if (layout.span != arena_size or layout.alignment > arena_size) return error.UnexpectedKernelLayout;
+    if (layout.span != kernel_size or layout.alignment > kernel_size) return error.UnexpectedKernelLayout;
     try bs.setWatchdogTimer(0, 0, null);
     const loader_base = @intFromPtr(loader.ptr);
     const loader_bytes: [*]u8 = @ptrCast(loader.ptr);
@@ -354,6 +358,63 @@ fn run(comptime Arch: type, bs: *uefi.tables.BootServices, loader: []align(4096)
         .framebuffer = fb,
     };
     info.header.header_size = @sizeOf(protocol.BootInfo);
+    const address_limit = if (bits >= 64) std.math.maxInt(u64) else @as(u64, 1) << @as(u6, @intCast(bits));
+    var wifi = wifi_assets.stage(bs, uefi.handle, address_limit) catch |err| failed: {
+        log(Arch, "[bootloader] Wi-Fi assets unavailable: ");
+        log(Arch, @errorName(err));
+        log(Arch, "\n");
+        break :failed wifi_assets.Outcome{};
+    };
+    defer if (!exit_attempted) {
+        if (wifi.assets) |*assets| assets.release(bs) catch {};
+    };
+    if (wifi.assets) |*assets| {
+        const reservation: protocol.PhysicalRange = .{ .base = @intFromPtr(assets.allocation.ptr), .length = assets.allocation.len };
+        if (discovery) |*parsed| {
+            if (parsed.conflicts(.{ .base = reservation.base, .length = reservation.length }))
+                return error.DeviceTreeReservationConflict;
+        }
+        assets.publish(&info.wifi);
+    }
+    logWifiAssets(Arch, wifi);
+    var driver = driver_assets.stage(bs, uefi.handle, switch (Arch.architecture) {
+        .x86_64 => .x86_64,
+        .aarch64 => .aarch64,
+        .riscv64 => .riscv64,
+    }, address_limit, options.driver_acceptance) catch |err| failed: {
+        log(Arch, "[bootloader] driver module rejected: ");
+        log(Arch, @errorName(err));
+        log(Arch, "\n");
+        break :failed null;
+    };
+    defer if (!exit_attempted) {
+        if (driver) |*value| value.release(bs) catch {};
+    };
+    if (driver) |value| {
+        if (discovery) |*parsed| if (parsed.conflicts(.{ .base = value.record.reservation.base, .length = value.record.reservation.length })) return error.DeviceTreeReservationConflict;
+        info.drivers.count = 1;
+        info.drivers.records[0] = value.record;
+        log(Arch, "[bootloader] matching driver module staged\n");
+    }
+    var apps = app_assets.stage(bs, uefi.handle, switch (Arch.architecture) {
+        .x86_64 => .x86_64,
+        .aarch64 => .aarch64,
+        .riscv64 => .riscv64,
+    }, address_limit) catch |err| failed: {
+        log(Arch, "[bootloader] application archive rejected: ");
+        log(Arch, @errorName(err));
+        log(Arch, "\n");
+        break :failed null;
+    };
+    defer if (!exit_attempted) {
+        if (apps) |*value| value.release(bs) catch {};
+    };
+    if (apps) |value| {
+        if (discovery) |*parsed| if (parsed.conflicts(.{ .base = value.record.reservation.base, .length = value.record.reservation.length })) return error.DeviceTreeReservationConflict;
+        info.apps = value.record;
+        log(Arch, "[bootloader] application archive staged\n");
+    }
+    info.wall_clock = @import("wall_clock.zig").capture(uefi.system_table);
     var map = try bs.getMemoryMap(raw_map);
     try memory.populate(map, info);
     try preserveDtbReservations(info, if (discovery) |*parsed| parsed else null);
@@ -378,6 +439,21 @@ fn run(comptime Arch: type, bs: *uefi.tables.BootServices, loader: []align(4096)
         jump(@intCast(entry), loader_base, @sizeOf(protocol.BootInfo), loader_base, arena_size, loader_base + arena_size);
     }
     return error.ExitBootServicesRetriesExhausted;
+}
+
+fn logWifiAssets(comptime Arch: type, outcome: wifi_assets.Outcome) void {
+    log(Arch, if (outcome.firmware == .ready) "[bootloader] Wi-Fi firmware assets verified\n" else "[bootloader] Wi-Fi firmware assets absent\n");
+    if (outcome.firmware != .ready) return;
+    log(Arch, switch (outcome.entropy) {
+        .ready => "[bootloader] Wi-Fi EFI RNG seed acquired\n",
+        .unavailable => "[bootloader] Wi-Fi EFI RNG unavailable\n",
+        .failed => "[bootloader] Wi-Fi EFI RNG failed\n",
+    });
+    log(Arch, switch (outcome.profile) {
+        .ready => "[bootloader] Wi-Fi board profile validated\n",
+        .absent => "[bootloader] Wi-Fi board profile absent\n",
+        .invalid => "[bootloader] Wi-Fi board profile rejected\n",
+    });
 }
 
 pub fn main(comptime Arch: type) uefi.Status {

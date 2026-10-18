@@ -2,7 +2,7 @@
 //! are supported; no interpreter, shared libraries, TLS or symbol resolver.
 const std = @import("std");
 pub const max_segments = 64;
-pub const max_span = 0x200000;
+pub const max_span = 0x400000;
 const max_relocations = 65536;
 pub const Error = error{
     TruncatedImage,

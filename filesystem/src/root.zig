@@ -1,10 +1,12 @@
 const std = @import("std");
 pub const ramfs = @import("ramfs.zig");
 pub const durable = @import("durable.zig");
+pub const partition = @import("partition.zig");
 
 test {
     _ = ramfs;
     _ = durable;
+    _ = partition;
 }
 
 /// Failures detected before a storage backend is invoked.

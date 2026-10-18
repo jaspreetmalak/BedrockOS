@@ -1,5 +1,6 @@
 //! Bounded first-profile native ELF64 executables. Inspection never writes RAM.
-//! One RX code/rodata page and one RW data/BSS page; stack is supplied separately.
+//! Trusted launch policy selects a fixture, desktop or installed-app profile.
+//! Code remains RX, data remains RW/NX; startup, heap and stack are not ELF LOADs.
 const std = @import("std");
 // The inspector is portable and has no dependency on runtime module instances.
 pub const code_address: u64 = 0x20_0000_0000;
@@ -114,11 +115,22 @@ pub fn inspectDesktop(bytes: []const u8, arch: std.Target.Cpu.Arch) Error!Image 
     return inspectProfile(bytes, arch, true);
 }
 
+pub const application_code_address: u64 = code_address + 0x10000;
+pub const application_data_address: u64 = code_address + 0x40000;
+pub const application_max_code_pages: u16 = 32;
+pub const application_max_data_pages: u16 = 256;
+
+/// Installed bundle identity and resource limits are checked by the launcher.
+/// This image profile cannot map the separate read-only startup page or heap.
+pub fn inspectApplication(bytes: []const u8, arch: std.Target.Cpu.Arch) Error!Image {
+    return inspectProfile(bytes, arch, true);
+}
+
 fn inspectProfile(bytes: []const u8, arch: std.Target.Cpu.Arch, desktop: bool) Error!Image {
-    const code_base = if (desktop) code_address + 0x10000 else code_address;
-    const data_base = if (desktop) code_address + 0x40000 else data_address;
-    const code_bytes: u64 = if (desktop) 0x20000 else page_size;
-    const data_bytes: u64 = if (desktop) 0x100000 else page_size;
+    const code_base = if (desktop) application_code_address else code_address;
+    const data_base = if (desktop) application_data_address else data_address;
+    const code_bytes: u64 = if (desktop) @as(u64, application_max_code_pages) * page_size else page_size;
+    const data_bytes: u64 = if (desktop) @as(u64, application_max_data_pages) * page_size else page_size;
     if (bytes.len < 64) return error.TruncatedImage;
     if (!std.mem.eql(u8, bytes[0..7], "\x7fELF\x02\x01\x01")) return error.InvalidElf;
     if (bytes[7] != 0 or bytes[8] != 0 or try field(u16, bytes, 16) != 2)
@@ -218,6 +230,52 @@ test "desktop ELF profile is explicit bounded and keeps code read-only" {
     put(u64, &bytes, 104, 0x20000);
     put(u32, &bytes, 68, 7);
     try t.expectError(error.InvalidSegment, inspectDesktop(&bytes, .x86_64));
+}
+
+test "installed application ELF profile permits larger code and BSS on every supported ISA" {
+    const t = std.testing;
+    for ([_]std.Target.Cpu.Arch{ .x86_64, .aarch64, .riscv64 }) |arch| {
+        var bytes = fixture(arch);
+        put(u64, &bytes, 24, application_code_address + 16);
+        put(u64, &bytes, 80, application_code_address);
+        put(u64, &bytes, 88, application_code_address);
+        put(u64, &bytes, 136, application_data_address);
+        put(u64, &bytes, 144, application_data_address);
+        put(u64, &bytes, 104, @as(u64, application_max_code_pages) * page_size);
+        put(u64, &bytes, 160, @as(u64, application_max_data_pages) * page_size);
+        const image = try inspectApplication(&bytes, arch);
+        try t.expectEqual(application_code_address + 16, image.entry);
+        try t.expectEqual(@as(u64, 0x20000), image.segments[0].memory_size);
+        try t.expectEqual(@as(u64, 0x100000), image.segments[1].memory_size);
+        try t.expectError(error.UnsupportedAddressRange, inspect(&bytes, arch));
+        put(u64, &bytes, 104, 0x20001);
+        try t.expectError(error.UnsupportedAddressRange, inspectApplication(&bytes, arch));
+        put(u64, &bytes, 104, 0x20000);
+        put(u64, &bytes, 160, 0x100001);
+        try t.expectError(error.UnsupportedAddressRange, inspectApplication(&bytes, arch));
+    }
+}
+
+test "application headers cannot claim the read-only startup page heap stack or writable code" {
+    const t = std.testing;
+    for ([_]std.Target.Cpu.Arch{ .x86_64, .aarch64, .riscv64 }) |arch| {
+        var bytes = fixture(arch);
+        put(u64, &bytes, 24, application_code_address + 16);
+        put(u64, &bytes, 80, application_code_address);
+        put(u64, &bytes, 88, application_code_address);
+        for ([_]u64{ code_address + 0x30000, code_address + 0x140000, code_address + 0x1e0000 }) |forbidden| {
+            put(u64, &bytes, 136, forbidden);
+            put(u64, &bytes, 144, forbidden);
+            try t.expectError(error.UnsupportedAddressRange, inspectApplication(&bytes, arch));
+        }
+        put(u64, &bytes, 136, application_data_address);
+        put(u64, &bytes, 144, application_data_address);
+        put(u32, &bytes, 68, 7);
+        try t.expectError(error.InvalidSegment, inspectApplication(&bytes, arch));
+        put(u32, &bytes, 68, 5);
+        put(u32, &bytes, 124, 5);
+        try t.expectError(error.InvalidSegment, inspectApplication(&bytes, arch));
+    }
 }
 
 fn fixture(arch: std.Target.Cpu.Arch) [2048]u8 {

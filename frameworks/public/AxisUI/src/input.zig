@@ -32,6 +32,7 @@ pub const Key = enum(u16) {
     f5 = 0x109,
     f4 = 0x10a,
     f11 = 0x10b,
+    f12 = 0x10c,
 };
 
 /// Wire bits: kind[0:8], modifiers[8:16], code[16:32], signed x[32:48],

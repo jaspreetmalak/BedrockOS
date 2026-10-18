@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "driver_abi": {"major": 1, "minor": 0},
+  "boot_essentials": [
+    "console",
+    "interrupts-and-timer",
+    "boot-storage"
+  ],
+  "packages": [
+    {
+      "id": "org.bedrock.mt7922",
+      "directory": "mt7922",
+      "package_version": "0.1.0",
+      "class": "wifi",
+      "module": "mt7922.bdm",
+      "architectures": {
+        "x86_64": "experimental",
+        "aarch64": "platform-unsupported",
+        "riscv64": "platform-unsupported"
+      },
+      "pci_matches": [
+        {"vendor": "14c3", "device": "7922"},
+        {"vendor": "14c3", "device": "0616"},
+        {"vendor": "0b48", "device": "7922"}
+      ]
+    }
+  ],
+  "known_unsupported": [
+    {"vendor": "14c3", "device": "7961", "name": "MediaTek MT7921 PCIe"},
+    {"vendor": "14c3", "device": "0608", "name": "MediaTek MT7921 PCIe variant"},
+    {"vendor": "14c3", "device": "7920", "name": "MediaTek MT792x PCIe variant"}
+  ]
+}

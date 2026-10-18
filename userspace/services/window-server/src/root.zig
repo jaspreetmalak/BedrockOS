@@ -2,6 +2,7 @@
 //! protected clients, input and scanout; this module owns no physical resources.
 const std = @import("std");
 const ui = @import("axisui");
+pub const header = @import("window_header");
 
 pub const Mode = enum { floating, maximized, fullscreen };
 pub const Control = enum { close, minimize, maximize, fullscreen };
@@ -32,6 +33,10 @@ pub const Window = struct {
     capture_button: u16 = 0,
     fullscreen_key_down: bool = false,
     escape_key_down: bool = false,
+    // Legacy hosts keep their original caption/control and viewport layout.
+    modern_header: bool = false,
+    header_content: bool = false,
+    header_tabs: bool = false,
 
     pub const title_height: u32 = 32;
     pub const workarea_top: u32 = 42;
@@ -56,7 +61,8 @@ pub const Window = struct {
     }
     pub fn client(self: Window) ui.Rect {
         const inset = self.borderWidth();
-        return .{ .x = self.x + @as(i32, @intCast(inset)), .y = self.y + @as(i32, @intCast(inset + title_height)), .width = self.width - 2 * inset, .height = self.height - 2 * inset - title_height };
+        const caption = if (self.modern_header and self.header_content) @as(u32, 0) else title_height;
+        return .{ .x = self.x + @as(i32, @intCast(inset)), .y = self.y + @as(i32, @intCast(inset + caption)), .width = self.width - 2 * inset, .height = self.height - 2 * inset - caption };
     }
     pub fn title(self: Window) ui.Rect {
         const inset = self.borderWidth();
@@ -64,11 +70,34 @@ pub const Window = struct {
     }
     /// The largest client extent is fullscreen with its retained exit strip.
     pub fn maxClient(self: Window) ui.Rect {
-        return .{ .x = 0, .y = title_height, .width = self.screen_width, .height = self.screen_height - title_height };
+        const caption = if (self.modern_header and self.header_content) @as(u32, 0) else title_height;
+        return .{ .x = 0, .y = @intCast(caption), .width = self.screen_width, .height = self.screen_height - caption };
     }
-    /// Hit rectangles are larger than the traffic dots drawn by the host.
+    pub fn accessory(self: Window) ui.Rect {
+        if (!self.modern_header or !self.header_content) return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+        const caption = self.title();
+        const rect = (header.layoutMode(caption.width, self.header_tabs) catch return .{ .x = 0, .y = 0, .width = 0, .height = 0 }).accessory;
+        return .{ .x = caption.x + rect.x, .y = caption.y + rect.y, .width = rect.width, .height = rect.height };
+    }
+    pub fn clientAt(self: Window, point: ui.Point) bool {
+        if (!self.client().contains(point)) return false;
+        return !self.title().contains(point) or self.accessory().contains(point);
+    }
+    /// Modern controls occupy the full caption height; legacy hosts retain
+    /// their original left-side controls and viewport geometry.
     pub fn controlRect(self: Window, control: Control) ui.Rect {
         const caption = self.title();
+        if (self.modern_header) {
+            if (control == .fullscreen) return .{ .x = caption.x, .y = caption.y, .width = 0, .height = 0 };
+            const h = header.layout(caption.width) catch return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+            const rect = h.control(switch (control) {
+                .minimize => .minimize,
+                .maximize => .maximize,
+                .close => .close,
+                .fullscreen => unreachable,
+            });
+            return .{ .x = caption.x + rect.x, .y = caption.y + rect.y, .width = rect.width, .height = rect.height };
+        }
         const offset: u32 = switch (control) {
             .close => 8,
             .minimize => 36,
@@ -196,16 +225,18 @@ pub const Window = struct {
         switch (event.kind) {
             .pointer_down => {
                 if (self.pressed_control != null or self.drag != null) return null;
-                if (event.code == 1 and !self.capture and self.title().contains(pointer)) {
+                if ((event.code == 1 or self.modern_header) and !self.capture and self.title().contains(pointer) and !self.accessory().contains(pointer)) {
                     self.focused = true;
-                    if (self.controlAt(pointer)) |control| {
-                        self.pressed_control = control;
-                    } else if (self.mode == .floating) {
-                        self.drag = .{ .x = pointer.x - self.x, .y = pointer.y - self.y };
+                    if (event.code == 1) {
+                        if (self.controlAt(pointer)) |control| {
+                            self.pressed_control = control;
+                        } else if (self.mode == .floating) {
+                            self.drag = .{ .x = pointer.x - self.x, .y = pointer.y - self.y };
+                        }
                     }
                     return null;
                 }
-                const inside = self.client().contains(pointer);
+                const inside = self.clientAt(pointer);
                 if (!self.capture) self.focused = inside;
                 if (!inside) return null;
                 if (!self.capture) {
@@ -221,7 +252,7 @@ pub const Window = struct {
                     self.saved_geometry = self.frame();
                     return null;
                 }
-                if (!self.capture and !self.client().contains(pointer)) return null;
+                if (!self.capture and !self.clientAt(pointer)) return null;
             },
             .pointer_up => {
                 if (self.pressed_control) |control| {
@@ -234,7 +265,7 @@ pub const Window = struct {
                     if (event.code == 1) self.drag = null;
                     return null;
                 }
-                if (!self.capture and !self.client().contains(pointer)) return null;
+                if (!self.capture and !self.clientAt(pointer)) return null;
                 if (self.capture and event.code == self.capture_button) {
                     self.capture = false;
                     self.capture_button = 0;
@@ -271,12 +302,86 @@ pub const Window = struct {
                 if (!self.focused) return null;
             },
             .text => if (!self.focused) return null,
-            .wheel => if (!self.focused or !self.client().contains(pointer)) return null,
+            .wheel => if (!self.focused or !self.clientAt(pointer)) return null,
             .redraw => {},
         }
         return self.localEvent(event);
     }
 };
+
+test "modern right controls and delegated accessory share protected caption hit geometry" {
+    const t = std.testing;
+    var window = try Window.init(1280, 800);
+    window.width = 320;
+    window.height = 240;
+    window.modern_header = true;
+    window.header_content = true;
+    const inner = window.client();
+    try t.expectEqual(window.title().y, inner.y);
+    try t.expectEqual(@as(u32, 236), inner.height);
+    const center = window.accessory();
+    try t.expectEqual(@as(u32, 66), center.width);
+    const down = window.route(.{ .kind = .pointer_down, .code = 1, .x = @intCast(center.x + 20), .y = @intCast(center.y + 12) }).?;
+    try t.expectEqual(@as(i16, 124), down.x);
+    try t.expectEqual(@as(i16, 16), down.y);
+    try t.expect(window.capture and window.drag == null and window.pressed_control == null);
+    const close = window.controlRect(.close);
+    const outside = window.route(.{ .kind = .pointer_up, .code = 1, .x = @intCast(close.x + 12), .y = @intCast(close.y + 12) }).?;
+    try t.expectEqual(@as(i16, @intCast(close.x + 12 - inner.x)), outside.x);
+    try t.expect(!window.closed and !window.capture);
+    try t.expectEqual(@as(u32, 0), window.controlRect(.fullscreen).width);
+    try t.expect(window.controlRect(.minimize).x < window.controlRect(.maximize).x and window.controlRect(.maximize).x < close.x);
+    try t.expect(window.route(.{ .kind = .pointer_down, .code = 3, .x = @intCast(inner.x + 20), .y = @intCast(inner.y + 16) }) == null);
+    try t.expect(window.focused);
+    try t.expect(window.route(.{ .kind = .pointer_down, .code = 1, .x = @intCast(inner.x + 20), .y = @intCast(inner.y + 16) }) == null);
+    try t.expect(window.drag != null and !window.capture);
+    _ = window.route(.{ .kind = .pointer_up, .code = 1 });
+    try t.expect(window.route(.{ .kind = .pointer_down, .code = 1, .x = @intCast(close.x + 12), .y = @intCast(close.y + 12) }) == null);
+    try t.expect(window.route(.{ .kind = .pointer_up, .code = 1, .x = @intCast(close.x + 12), .y = @intCast(close.y + 12) }) == null);
+    try t.expect(window.closed);
+}
+test "modern server-only caption keeps content below header and keyboard fullscreen usable" {
+    const t = std.testing;
+    var window = try Window.init(800, 600);
+    window.modern_header = true;
+    try t.expectEqual(window.title().y + 32, window.client().y);
+    try t.expectEqual(@as(u32, 0), window.accessory().width);
+    _ = window.route(.{ .kind = .key_down, .code = key.f11 });
+    try t.expectEqual(Mode.fullscreen, window.mode);
+    try t.expectEqual(@as(i32, 32), window.client().y);
+    _ = window.route(.{ .kind = .key_up, .code = key.f11 });
+    _ = window.route(.{ .kind = .key_down, .code = @backingInt(ui.input.Key.escape) });
+    try t.expectEqual(Mode.floating, window.mode);
+}
+
+test "modern control edges retain server authority across floating maximized and fullscreen modes" {
+    const t = std.testing;
+    var window = try Window.init(800, 600);
+    window.modern_header = true;
+    window.header_content = true;
+    for (0..3) |mode| {
+        if (mode == 1) window.maximize();
+        if (mode == 2) window.toggleFullscreen();
+        const title_rect = window.title();
+        for ([_]Control{ .minimize, .maximize, .close }) |control| {
+            const rect = window.controlRect(control);
+            for ([_]i32{ rect.y, rect.y + @as(i32, @intCast(rect.height)) - 1 }) |y| {
+                for ([_]i32{ rect.x, rect.x + @as(i32, @intCast(rect.width)) - 1 }) |x| {
+                    const point: ui.Point = .{ .x = x, .y = y };
+                    try t.expectEqual(@as(?Control, control), window.controlAt(point));
+                    try t.expect(!window.clientAt(point));
+                    try t.expect(window.route(.{ .kind = .pointer_down, .code = 1, .x = @intCast(x), .y = @intCast(y) }) == null);
+                    try t.expectEqual(@as(?Control, control), window.pressed_control);
+                    try t.expect(!window.capture and window.drag == null);
+                    // Releasing on the title cancels the original control press.
+                    try t.expect(window.route(.{ .kind = .pointer_up, .code = 1, .x = @intCast(title_rect.x + 12), .y = @intCast(title_rect.y + 16) }) == null);
+                    try t.expect(window.pressed_control == null and window.visible and !window.closed);
+                }
+            }
+        }
+        try t.expectEqual(@as(?Control, null), window.controlAt(.{ .x = title_rect.x + @as(i32, @intCast(title_rect.width)), .y = title_rect.y }));
+    }
+}
 
 test "window geometry fits supported screens with bounded useful clients" {
     const t = std.testing;

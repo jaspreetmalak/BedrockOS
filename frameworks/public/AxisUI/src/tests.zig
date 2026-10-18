@@ -94,19 +94,24 @@ test "vertical stacks center fixed cross-axis frames and place overlays in decla
     try std.testing.expectEqual(@as(u32, 0xff), pixels[12 * 20 + 12]);
 }
 
-test "text intrinsic size and inherited color scale contribute to stack placement" {
-    var pixels: [48 * 28]u32 = @splat(0);
-    var surface = try ui.Surface.init(&pixels, 48, 28, 48, rgb);
+test "proportional text intrinsic size and inherited color scale contribute to stack placement" {
+    const height = ui.font.line_height * 2 + 4;
+    var pixels: [48 * height]u32 = @splat(0);
+    var surface = try ui.Surface.init(&pixels, 48, height, 48, rgb);
     const children = [_]ui.View{ ui.Text("A"), ui.Spacer().frame(4, null).background(blue) };
     try ui.render(&surface, ui.HStack(&children).padding(2).foreground(red).scale(2));
-    const next = 2 + ui.font.advance * 2;
+    const next = 2 + ui.font.glyphAdvance('A') * 2;
     try std.testing.expectEqual(@as(u32, 0xff), pixels[2 * 48 + next]);
     try std.testing.expectEqual(@as(u32, 0), pixels[2 * 48 + next - 1]);
-    // A's first row starts at column1, with the shared glyph origin.
-    const x = 2 + (ui.font.offset_x + 1) * 2;
-    const y = 2 + ui.font.offset_y * 2;
-    try std.testing.expectEqual(@as(u32, 0xff0000), pixels[y * 48 + x]);
-    try std.testing.expectEqual(@as(u32, 0xff0000), pixels[(y + 1) * 48 + x + 1]);
+    var ink: usize = 0;
+    var antialiased: usize = 0;
+    for (0..height) |y| for (2..next) |x| {
+        const pixel = pixels[y * 48 + x];
+        try std.testing.expect(pixel & 0xffff == 0);
+        if (pixel != 0) ink += 1;
+        if (pixel != 0 and pixel != 0xff0000) antialiased += 1;
+    };
+    try std.testing.expect(ink > 20 and antialiased > 10);
 }
 
 test "rounded ancestor clips child corners and border overlays child backgrounds" {
@@ -125,9 +130,64 @@ test "text alignment centers glyphs inside its fixed outer frame" {
     var pixels: [16 * 24]u32 = @splat(0);
     var surface = try ui.Surface.init(&pixels, 16, 24, 16, rgb);
     try ui.render(&surface, ui.Text("A").frame(16, 24).@"align"(.center).foreground(red).background(blue));
-    try std.testing.expectEqual(@as(u32, 0xff0000), pixels[8 * 16 + 6]);
-    try std.testing.expectEqual(@as(u32, 0xff0000), pixels[14 * 16 + 5]);
-    try std.testing.expectEqual(@as(u32, 0xff), pixels[2 * 16 + 2]);
+    // The cap-height band is centered; the font's line descent is not mistaken
+    // for visible label height. Width follows the face's proportional advance.
+    const glyph_width = ui.font.glyphAdvance('A');
+    const origin_x = (16 - glyph_width) / 2;
+    const origin_y: usize = @intCast(try ui.font.controlOriginY(0, 24, 1));
+    for (0..24) |y| for (0..16) |x| {
+        const alpha: u32 = if (x >= origin_x and x < origin_x + glyph_width and y >= origin_y and y < origin_y + ui.font.coverage_height) ui.font.coverage('A', @intCast(x - origin_x), @intCast(y - origin_y), 1) else 0;
+        try std.testing.expectEqual((alpha << 16) | (255 - alpha), pixels[y * 16 + x]);
+    };
+}
+
+test "control labels share a baseline across horizontal alignments and retain descenders" {
+    const stride = 101;
+    const width = 96;
+    const height = 28;
+    const guard: u32 = 0x315779;
+    var memory: [height * stride + 2]u32 = @splat(guard);
+    var surface = try ui.Surface.init(memory[1 .. memory.len - 1], width, height, stride, rgb);
+    const children = [_]ui.View{
+        ui.Text("g").frame(32, 28).padding(6).@"align"(.start).textVerticalAlign(.center).foreground(red),
+        ui.Text("g").frame(32, 28).padding(6).@"align"(.center).textVerticalAlign(.center).foreground(red),
+        ui.Text("g").frame(32, 28).padding(6).@"align"(.end).textVerticalAlign(.center).foreground(red),
+    };
+    try ui.render(&surface, ui.HStack(&children).background(blue));
+    var first: [3]usize = @splat(height);
+    var last: [3]usize = @splat(0);
+    var ink: [3]usize = @splat(0);
+    for (0..height) |y| for (0..width) |x| {
+        const pixel = memory[1 + y * stride + x];
+        if (pixel & 0xff0000 == 0) continue;
+        const column = x / 32;
+        first[column] = @min(first[column], y);
+        last[column] = @max(last[column], y);
+        ink[column] += 1;
+    };
+    for (1..3) |column| {
+        try std.testing.expectEqual(first[0], first[column]);
+        try std.testing.expectEqual(last[0], last[column]);
+        try std.testing.expectEqual(ink[0], ink[column]);
+    }
+    // Coverage in the descent enters the leaf's own padding, while each text
+    // leaf and the surface retain their complete outer clipping boundaries.
+    try std.testing.expect(last[0] > height - 6 - 1);
+    try std.testing.expect(ink[0] != 0);
+    try std.testing.expectEqual(guard, memory[0]);
+    try std.testing.expectEqual(guard, memory[memory.len - 1]);
+    for (0..height) |y| for (width..stride) |x| try std.testing.expectEqual(guard, memory[1 + y * stride + x]);
+}
+
+test "legacy centered text retains its historical line-box placement" {
+    var pixels: [16 * 24]u32 = @splat(0);
+    var surface = try ui.Surface.init(&pixels, 16, 24, 16, rgb);
+    surface.legacy_text = true;
+    try ui.render(&surface, ui.Text("A").frame(16, 24).@"align"(.center).foreground(red).background(blue));
+    for (0..24) |y| for (0..16) |x| {
+        const lit = x >= 5 and x < 10 and y >= 8 and y < 15 and (ui.font.glyph('A')[y - 8] & (@as(u8, 1) << @as(u3, @intCast(9 - x)))) != 0;
+        try std.testing.expectEqual(@as(u32, if (lit) 0xff0000 else 0xff), pixels[y * 16 + x]);
+    };
 }
 
 test "invalid descendants are rejected before backgrounds can alter any pixel" {
@@ -181,7 +241,7 @@ test "intrinsic size overflow in a bounded shared-text graph fails before painti
     var pixels: [1]u32 = .{0x12345678};
     var surface = try ui.Surface.init(&pixels, 1, 1, 1, rgb);
     const letters: [65536]u8 = @splat('A');
-    const leaf_count = std.math.maxInt(u32) / (letters.len * ui.font.advance * 16) + 1;
+    const leaf_count = comptime std.math.maxInt(u32) / (letters.len * ui.font.glyphAdvance('A') * 16) + 1;
     const leaves: [leaf_count]ui.View = @splat(ui.Text(&letters).scale(16));
     // Bounded individually valid text leaves overflow their combined32-bit width.
     try std.testing.expectError(error.LayoutOverflow, ui.render(&surface, ui.HStack(&leaves).background(red)));
@@ -202,24 +262,27 @@ test "caller-owned workspace can be reused after success and rejected graph" {
 }
 
 test "code punctuation renders distinct original parenthesis ampersand semicolon glyphs" {
-    var pixels: [32 * 12]u32 = @splat(0);
-    var surface = try ui.Surface.init(&pixels, 32, 12, 32, rgb);
+    const stride = ui.font.max_glyph_width * 4;
+    var pixels: [stride * ui.font.line_height]u32 = @splat(0);
+    var surface = try ui.Surface.init(&pixels, stride, ui.font.line_height, stride, rgb);
     try ui.render(&surface, ui.Text("()&;"));
-    const white: u32 = 0xffffff;
-    const x = ui.font.offset_x;
-    const y = ui.font.offset_y;
-    try std.testing.expectEqual(white, pixels[y * 32 + x + 3]);
-    try std.testing.expectEqual(@as(u32, 0), pixels[y * 32 + x + 1]);
-    try std.testing.expectEqual(white, pixels[y * 32 + x + ui.font.advance + 1]);
-    try std.testing.expectEqual(white, pixels[y * 32 + x + ui.font.advance * 2 + 1]);
-    try std.testing.expectEqual(@as(u32, 0), pixels[y * 32 + x + ui.font.advance * 2 + 3]);
-    try std.testing.expectEqual(@as(u32, 0), pixels[y * 32 + x + ui.font.advance * 3 + 2]);
-    try std.testing.expectEqual(white, pixels[(y + 1) * 32 + x + ui.font.advance * 3 + 2]);
+    var x: u32 = 0;
+    for ("()&;") |byte| {
+        var ink: usize = 0;
+        const width = ui.font.glyphAdvance(byte);
+        for (0..ui.font.line_height) |y| for (0..width) |column| {
+            const alpha: u32 = ui.font.coverage(byte, @intCast(column), @intCast(y), 1);
+            try std.testing.expectEqual(alpha * 0x010101, pixels[y * stride + x + column]);
+            ink += @intFromBool(alpha != 0);
+        };
+        try std.testing.expect(ink > 3);
+        x += width;
+    }
 }
 
 test "font metrics preserve lowercase and printable ASCII at compact advances" {
     const measured = try ui.font.measure("Ab\tZ\r\nx", 2);
-    try std.testing.expectEqual(@as(u32, 7 * ui.font.advance * 2), measured.width);
+    try std.testing.expectEqual(@as(u32, 102), measured.width);
     try std.testing.expectEqual(@as(u32, ui.font.line_height * 4), measured.height);
     try std.testing.expectEqualDeep(ui.font.Size{}, try ui.font.measure("", 1));
     try std.testing.expectError(error.InvalidScale, ui.font.measure("text", 0));
@@ -237,21 +300,21 @@ test "font metrics preserve lowercase and printable ASCII at compact advances" {
     }
 }
 
-test "native text pixels retain case and fit their declared cells" {
-    var pixels: [12 * 10]u32 = @splat(0);
-    var surface = try ui.Surface.init(&pixels, 12, 10, 12, rgb);
+test "native text pixels retain case and fit their proportional advances" {
+    const stride = ui.font.max_glyph_width * 2;
+    var pixels: [stride * ui.font.line_height]u32 = @splat(0);
+    var surface = try ui.Surface.init(&pixels, stride, ui.font.line_height, stride, rgb);
     try ui.render(&surface, ui.Text("Aa").foreground(red));
-    var first: [60]u32 = undefined;
-    var second: [60]u32 = undefined;
-    for (0..10) |y| for (0..6) |x| {
-        first[y * 6 + x] = pixels[y * 12 + x];
-        second[y * 6 + x] = pixels[y * 12 + x + 6];
-    };
-    try std.testing.expect(!std.mem.eql(u32, &first, &second));
-    for (0..10) |y| {
-        try std.testing.expectEqual(@as(u32, 0), pixels[y * 12 + 5]);
-        try std.testing.expectEqual(@as(u32, 0), pixels[y * 12 + 11]);
+    var first: [ui.font.max_glyph_width * ui.font.coverage_height]u32 = @splat(0);
+    var second: [ui.font.max_glyph_width * ui.font.coverage_height]u32 = @splat(0);
+    const first_width = ui.font.glyphAdvance('A');
+    const second_width = ui.font.glyphAdvance('a');
+    for (0..ui.font.coverage_height) |y| {
+        for (0..first_width) |x| first[y * ui.font.max_glyph_width + x] = pixels[y * stride + x];
+        for (0..second_width) |x| second[y * ui.font.max_glyph_width + x] = pixels[y * stride + x + first_width];
     }
+    try std.testing.expect(!std.mem.eql(u32, &first, &second));
+    for (0..ui.font.line_height) |y| for (first_width + second_width..stride) |x| try std.testing.expectEqual(@as(u32, 0), pixels[y * stride + x]);
 }
 
 test "native icon edge clipping preserves stride guards and command equality" {
@@ -274,9 +337,14 @@ test "native icon edge clipping preserves stride guards and command equality" {
                 self.pixels[row * 16 + col] = value;
             };
         }
+        fn blend(context: *anyopaque, x: u32, y: u32, value: u32, alpha: u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            var destination = ui.Surface.init(&self.pixels, 16, 16, 16, rgb) catch unreachable;
+            destination.blendPixel(x, y, destination.decode(value), alpha);
+        }
     };
     var sink: Sink = .{};
-    var commands = try ui.Surface.initCommands(16, 16, .{ .context = &sink, .fillRect = Sink.fill });
+    var commands = try ui.Surface.initCommands(16, 16, .{ .context = &sink, .fillRect = Sink.fill, .blendPixel = Sink.blend });
     var direct: [16 * 16]u32 = @splat(0);
     var native = try ui.Surface.init(&direct, 16, 16, 16, rgb);
     inline for (std.meta.tags(ui.Icon)) |icon| {
@@ -303,12 +371,22 @@ test "command surface emits identical clipped rounded text pixels without a fram
                 self.pixels[row * self.width + column] = value;
             };
         }
+        fn blend(context: *anyopaque, x: u32, y: u32, value: u32, alpha: u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            if (x >= self.width or y >= self.height) {
+                self.invalid = true;
+                return;
+            }
+            var received = ui.Surface.init(self.pixels, self.width, self.height, self.width, rgb) catch unreachable;
+            received.blendPixel(x, y, received.decode(value), alpha);
+        }
     };
     var direct: [64 * 48]u32 = @splat(0x333333);
     var submitted = direct;
     var receiver: Sink = .{ .pixels = &submitted, .width = 64, .height = 48 };
     var native = try ui.Surface.init(&direct, 64, 48, 64, .{ .red = 0xff0000, .green = 0xff00, .blue = 0xff });
-    var commands = try ui.Surface.initCommands(64, 48, .{ .context = &receiver, .fillRect = Sink.fill });
+    var commands = try ui.Surface.initCommands(64, 48, .{ .context = &receiver, .fillRect = Sink.fill, .blendPixel = Sink.blend });
     var workspace: ui.Workspace = undefined;
     const children = [_]ui.View{
         ui.Text("AB\nC").padding(3).scale(2).frame(60, 40).background(ui.Color.rgb(40, 60, 80)).cornerRadius(12),

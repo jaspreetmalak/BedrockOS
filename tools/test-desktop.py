@@ -21,6 +21,9 @@ ROOT = Path(__file__).resolve().parent.parent
 PREFIX = "/container/0000000000000002/"
 WELCOME = b"Welcome to Bedrock.\nDrag this file into Downloads.\nCtrl-drag copies; F2 renames.\nYour files survive reboot.\n"
 NULLIFY_SECRET = b"Bedrock-Nullify-owned-test-secret-68310792\n"
+LAUNCH_TEXT_INK = frozenset(bytes((foreground * coverage + background * (255 - coverage) + 127) // 255
+                                  for foreground, background in zip((212, 149, 173), (51, 53, 65)))
+                           for coverage in range(128, 256))
 
 def seed_owned_test_image(path, formatter):
     """Populate only the fresh, owned temporary image used by this workflow."""
@@ -87,7 +90,7 @@ def verify_nullified_banks(path):
     assert sanitized[0] == sanitized[1], "The verified banks differ in surviving records or next serial"
     return generations
 
-def reference_frost(pixels, width, height, x, y, tint=(18, 24, 33), opacity=170):
+def reference_frost(pixels, width, height, x, y, tint=(36, 40, 51), opacity=100):
     """Independent small-region reference from the unobscured desktop capture."""
     columns, rows = (width + 7) // 8, (height + 7) // 8
     @lru_cache(maxsize=None)
@@ -327,7 +330,7 @@ class Machine:
             # completed name. Await it before switching from keyboard to mouse.
             x = self.cx + 136 + (len(prefix) + len(name)) * 6 + 2
             return all(pixels[((self.cy + 13 + row) * self.width + x) * 3:
-                              ((self.cy + 13 + row) * self.width + x) * 3 + 3] == bytes((214, 169, 186))
+                              ((self.cy + 13 + row) * self.width + x) * 3 + 3] == bytes((202, 186, 214))
                        for row in range(7))
         self.wait(typed, "completed native name editing", timeout=30)
     def row(self, pane=0, index=0): return self.cx + 148 + 34 + pane * (self.pane_width + 1), self.cy + 68 + 14 + index * 28
@@ -362,7 +365,7 @@ class Machine:
             changed = False
             for px, py in ((x, y + height // 2), (x + 104, y)):
                 offset = (py * self.width + px) * 3
-                if current[offset:offset + 3] != bytes((46, 42, 49)): return False
+                if current[offset:offset + 3] != bytes((79, 83, 101)): return False
                 changed |= current[offset:offset + 3] != before[offset:offset + 3]
             return changed
         self.wait(appeared, "native context menu", timeout=30)
@@ -370,7 +373,7 @@ class Machine:
         x, y, height, _ = self.menu_rect
         def disappeared():
             current = self.capture("dismissed-menu")
-            return any(current[(py * self.width + px) * 3:(py * self.width + px) * 3 + 3] != bytes((46, 42, 49))
+            return any(current[(py * self.width + px) * 3:(py * self.width + px) * 3 + 3] != bytes((79, 83, 101))
                        for px, py in ((x, y + height // 2), (x + 104, y)))
         self.wait(disappeared, "native context menu dismissal", timeout=90)
     def right_click(self, point, kind="file"):
@@ -391,7 +394,7 @@ class Machine:
         def selected():
             pixels = self.capture("navigation-check")
             offset = ((self.cy + 88 + index * 36) * self.width + self.cx + 128) * 3
-            return pixels[offset:offset + 3] == bytes((64, 48, 58))
+            return pixels[offset:offset + 3] == bytes((63, 60, 78))
         self.wait(selected, "sidebar navigation", timeout=30)
     def row_named(self, relative, pane=0):
         parent, name = relative.rsplit("/", 1)
@@ -433,6 +436,35 @@ class Machine:
         return [(self.cx + 148 + (self.client_width - 148) * fraction // 4, self.cy + y)
                 for fraction in (1, 2, 3)
                 for y in (self.client_height // 2, self.client_height - 60)]
+    def wallpaper_ready(self, previously_visible):
+        # A vanished top border can precede most of the row-by-row wallpaper
+        # repaint. Require old client/footer ink gone and the launch bar drawn
+        # after that wallpaper pass before accepting a stable complete frame.
+        footer_ink = [(y * self.width + x) * 3
+                      for y in range(self.cy + self.client_height - 24, self.cy + self.client_height)
+                      for x in range(self.cx + 8, self.cx + self.client_width - 8)
+                      if previously_visible[(y * self.width + x) * 3:(y * self.width + x) * 3 + 3]
+                      in (bytes((154, 166, 187)), bytes((255, 160, 150)))]
+        launch_ink = [(y * self.width + x) * 3 for y in range(36) for x in range(94, 166)
+                      if previously_visible[(y * self.width + x) * 3:(y * self.width + x) * 3 + 3]
+                      in LAUNCH_TEXT_INK]
+        probes = [(y * self.width + x) * 3 for x, y in self.frost_probes()]
+        assert len(footer_ink) > 20 and len(launch_ink) > 35, "Missing initial client/footer or launch bar paint"
+        previous, stable, wallpaper = None, 0, None
+        def complete():
+            nonlocal previous, stable, wallpaper
+            current = self.capture("unobscured-wallpaper")
+            if (any(current[offset:offset + 3] == previously_visible[offset:offset + 3] for offset in footer_ink + probes)
+                    or any(current[offset:offset + 3] != previously_visible[offset:offset + 3] for offset in launch_ink)):
+                previous, stable = None, 0
+                return False
+            stable = stable + 1 if current == previous else 1
+            previous = current
+            if stable < 3: return False
+            wallpaper = current
+            return True
+        self.wait(complete, "complete stable wallpaper after minimize", timeout=30)
+        return wallpaper
     def check_frost(self, wallpaper, previously_visible):
         expected = {point: reference_frost(wallpaper, self.width, self.height, *point) for point in self.frost_probes()}
         assert len(set(expected.values())) > 1, "Wallpaper frost should retain softly varying color"
@@ -584,7 +616,7 @@ def main():
             time.sleep(.5)
             frosted_before = machine.capture("frosted-before-minimize")
             machine.control("minimize"); machine.visible(False)
-            wallpaper = machine.capture("unobscured-wallpaper")
+            wallpaper = machine.wallpaper_ready(frosted_before)
             machine.click(130, 18)
             time.sleep(1)
             machine.visible()

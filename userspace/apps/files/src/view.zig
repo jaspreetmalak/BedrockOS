@@ -4,32 +4,33 @@ const ui = @import("axisui");
 const api = @import("provider.zig");
 const Model = @import("model.zig").Model;
 const layout = @import("layout.zig");
+const path_edit = @import("path_editor.zig");
 const View = ui.View;
 const Color = ui.Color;
 pub const colors = struct {
-    pub const background = Color.rgb(18, 24, 33);
-    pub const panel = Color.rgb(22, 29, 40);
-    pub const sidebar = Color.rgb(23, 30, 42);
-    pub const toolbar = Color.rgb(25, 31, 43);
-    pub const text = Color.rgb(230, 235, 244);
-    pub const muted = Color.rgb(154, 166, 187);
-    pub const accent = Color.rgb(214, 169, 186);
-    pub const selected = Color.rgb(64, 48, 58);
-    pub const hover = Color.rgb(49, 43, 49);
-    pub const border = Color.rgb(46, 42, 49);
-    pub const folder = Color.rgb(235, 209, 171);
-    pub const document = Color.rgb(183, 202, 222);
-    pub const drop = Color.rgb(44, 59, 63);
+    pub const background = Color.rgb(36, 40, 51);
+    pub const panel = Color.rgb(45, 49, 63);
+    pub const sidebar = Color.rgb(42, 46, 59);
+    pub const toolbar = Color.rgb(42, 46, 59);
+    pub const text = Color.rgb(233, 235, 243);
+    pub const muted = Color.rgb(173, 179, 195);
+    pub const accent = Color.rgb(202, 186, 214);
+    pub const selected = Color.rgb(63, 60, 78);
+    pub const hover = Color.rgb(57, 59, 75);
+    pub const border = Color.rgb(79, 83, 101);
+    pub const folder = Color.rgb(211, 196, 174);
+    pub const document = Color.rgb(185, 198, 219);
+    pub const drop = Color.rgb(52, 68, 72);
     pub const error_color = Color.rgb(255, 160, 150);
 };
 pub const materials = struct {
-    pub const client: ui.Material = .{ .tint = colors.background, .opacity = 170 };
-    pub const navigation: ui.Material = .{ .tint = colors.toolbar, .opacity = 210 };
-    pub const sidebar: ui.Material = .{ .tint = colors.sidebar, .opacity = 200 };
-    pub const columns: ui.Material = .{ .tint = colors.toolbar, .opacity = 195 };
-    pub const location: ui.Material = .{ .tint = colors.panel, .opacity = 215 };
-    pub const footer: ui.Material = .{ .tint = colors.toolbar, .opacity = 205 };
-    pub const menu: ui.Material = .{ .tint = colors.toolbar, .opacity = 225 };
+    pub const client: ui.Material = .{ .tint = colors.background, .opacity = 100 };
+    pub const navigation: ui.Material = .{ .tint = colors.toolbar, .opacity = 112 };
+    pub const sidebar: ui.Material = .{ .tint = colors.sidebar, .opacity = 130 };
+    pub const columns: ui.Material = .{ .tint = colors.toolbar, .opacity = 80 };
+    pub const location: ui.Material = .{ .tint = colors.panel, .opacity = 132 };
+    pub const footer: ui.Material = .{ .tint = colors.toolbar, .opacity = 96 };
+    pub const menu: ui.Material = .{ .tint = colors.panel, .opacity = 170 };
 };
 pub const Workspace = struct {
     axisui: ui.Workspace,
@@ -42,12 +43,13 @@ pub const Workspace = struct {
     preview_text: [1100]u8,
     menu_rows: [10]View,
 };
-fn text(bytes: []const u8, width: ?u16, height: u16, color: Color) View {
+fn text(bytes: []const u8, width: ?u16, height: u16, color: Color, legacy: bool) View {
     var result = ui.Text(bytes);
     result.style = comptime ui.Text("").foreground(colors.text).style;
     result.style.width = width;
     result.style.height = height;
     result.style.foreground_color = color;
+    if (!legacy) result.style.text_vertical_alignment = .center;
     return result;
 }
 fn blank(width: ?u16, height: ?u16) View {
@@ -56,9 +58,10 @@ fn blank(width: ?u16, height: ?u16) View {
     result.style.height = height;
     return result;
 }
-fn button(name: []const u8, action: layout.Action, geometry: layout.Geometry, model: *const Model) View {
+fn button(name: []const u8, action: layout.Action, geometry: layout.Geometry, model: *const Model, legacy: bool) View {
     const rect = geometry.button(action);
-    var result = text(name, @intCast(rect.width), 32, colors.text);
+    var result = text(name, @intCast(rect.width), 32, colors.text, legacy);
+    result = result.smoothCorners();
     result.style.alignment = .center;
     result.style.radius = 4;
     if (model.pressed_action == action) result.style.background_color = colors.selected else if (model.hovered_action == action) result.style.background_color = colors.hover;
@@ -130,50 +133,143 @@ fn help(action: layout.Action) []const u8 {
     };
 }
 pub fn renderWithWorkspace(surface: *ui.Surface, workspace: *Workspace, model: *const Model) !void {
+    return renderBody(surface, workspace, model, false);
+}
+/// Render the translated body and a client-owned location field.
+/// Title/control chrome remains under the compositor's authority.
+pub fn renderWindowWithWorkspace(surface: *ui.Surface, workspace: *Workspace, model: *const Model, path: ui.Rect) !void {
+    _ = try layout.WindowGeometry.init(surface.width, surface.height, model.split, path);
+    try surface.validate();
+    var body_overlay: Overlay = .{ .parent = surface, .origin = .{ .x = 0, .y = layout.window_header_height } };
+    var body = try ui.Surface.initCommands(surface.width, surface.height - layout.window_header_height, body_overlay.sink());
+    try renderBody(&body, workspace, model, true);
+    if (path.y >= layout.window_header_height and model.edit != .none) return;
+
+    var field_overlay: Overlay = .{ .parent = surface, .origin = .{ .x = path.x, .y = path.y } };
+    var field = try ui.Surface.initCommands(path.width, path.height, field_overlay.sink());
+    // Reset the location base before coverage blending. Its rectangle belongs
+    // to the client; title and window controls remain untouched.
+    field.materialRect(0, 0, path.width, path.height, materials.navigation);
+    var background = ui.Text("").frame(@intCast(path.width), @intCast(path.height)).cornerRadius(4).smoothCorners().material(materials.location);
+    background.style.border_color = if (model.path_editing) colors.accent else colors.border;
+    background.style.border_width = 1;
+    try ui.renderWithWorkspace(&field, &workspace.axisui, background);
+
+    const width = path.width -| 12;
+    if (width == 0) return;
+    var text_overlay: Overlay = .{ .parent = surface, .origin = .{ .x = path.x + 6, .y = path.y + @as(i32, @intCast((path.height -| ui.font.line_height) / 2)) } };
+    var text_surface = try ui.Surface.initCommands(width, @min(path.height, ui.font.line_height), text_overlay.sink());
+    const bytes = model.headerPath();
+    const start = if (model.path_editing) model.path_editor.visibleStart(width) else 0;
+    var end = start;
+    while (end < bytes.len and path_edit.measured(bytes[start .. end + 1]) <= width) : (end += 1) {}
+    if (model.path_editing) {
+        const selected = model.path_editor.selection();
+        const first = @max(start, selected.start);
+        const last = @min(end, selected.end);
+        if (first < last) {
+            const x = path_edit.measured(bytes[start..first]);
+            text_surface.fillRect(x, 0, path_edit.measured(bytes[first..last]), text_surface.height, text_surface.encode(colors.selected));
+        }
+    }
+    // Keep selection and caret geometry stable while giving glyph coverage the
+    // full field clip: descenders may extend beyond a nominal line box.
+    if (surface.legacy_text) {
+        try ui.font.paint(&text_surface, bytes[start..end], 0, 0, colors.text, 1);
+    } else {
+        var glyph_overlay: Overlay = .{ .parent = surface, .origin = .{ .x = path.x + 6, .y = path.y } };
+        var glyph_surface = try ui.Surface.initCommands(width, path.height, glyph_overlay.sink());
+        try ui.font.paint(&glyph_surface, bytes[start..end], 0, try ui.font.controlOriginY(0, path.height, 1), colors.text, 1);
+    }
+    if (model.path_editing) {
+        const x = @min(width - 1, path_edit.measured(bytes[start..model.path_editor.cursor]));
+        text_surface.fillRect(x, 1, 1, text_surface.height -| 2, text_surface.encode(colors.accent));
+    }
+}
+/// Repaint the existing guarded context-menu overlay after a caller-owned app
+/// toolbar. It uses the same body geometry and cannot paint service caption
+/// pixels. Input stays in Model's existing matched context-menu controller.
+pub fn renderWindowMenuWithWorkspace(surface: *ui.Surface, workspace: *Workspace, model: *const Model) !void {
+    if (!model.initialized) return error.NotInitialized;
+    if (surface.height <= layout.window_header_height) return error.InvalidViewport;
+    _ = try layout.Geometry.initMode(surface.width, surface.height - layout.window_header_height, model.split);
+    try surface.validate();
+    const menu = model.menu orelse return;
+    var overlay: Overlay = .{ .parent = surface, .origin = .{ .x = 0, .y = layout.window_header_height } };
+    var body = try ui.Surface.initCommands(surface.width, surface.height - layout.window_header_height, overlay.sink());
+    body.legacy_text = surface.legacy_text;
+    try renderMenu(&body, workspace, model, menu.kind, menu.anchor);
+}
+fn renderBody(surface: *ui.Surface, workspace: *Workspace, model: *const Model, header_location: bool) !void {
     if (!model.initialized) return error.NotInitialized;
     const geometry = try layout.Geometry.initMode(surface.width, surface.height, model.split);
-    const location_text = location(workspace, model, (surface.width - 156 - @as(u32, if (model.edit != .none) 132 else 104)) / ui.font.advance);
-    var crumb = text(location_text, null, 32, if (model.edit != .none) colors.accent else colors.text);
+    const compact_edit = model.edit != .none and !geometry.canSplit();
+    const leading_width: u32 = if (compact_edit) 12 else 128;
+    const trailing_width: u32 = if (model.edit != .none) 144 else if (geometry.canSplit()) 116 else 64;
+    const crumb_width = surface.width - leading_width - trailing_width;
+    const location_text = if (header_location and model.edit == .none) "" else location(workspace, model, (crumb_width - 16) / ui.font.advance);
+    // Fixed offered width keeps a long breadcrumb from moving action hit areas.
+    var crumb = text(location_text, @intCast(crumb_width), 32, if (model.edit != .none) colors.accent else colors.text, surface.legacy_text);
+    crumb = crumb.smoothCorners();
     crumb.style.inset = 8;
-    crumb.style.flex_weight = 1;
     crumb = crumb.material(materials.location);
     crumb.style.radius = 4;
+    if (header_location and model.edit == .none) crumb = blank(@intCast(crumb_width), 32);
     var nav_items: [13]View = undefined;
-    const nav_prefix = [_]View{ blank(12, null), button("<", .back, geometry, model), blank(4, null), button(">", .forward, geometry, model), blank(4, null), button("^", .up, geometry, model), blank(12, null), crumb };
-    @memcpy(nav_items[0..nav_prefix.len], &nav_prefix);
-    var nav_count: usize = 9;
-    if (model.edit != .none) {
-        nav_items[8] = blank(4, null);
-        nav_items[9] = text(if (model.edit == .rename) "Save" else "Create", 64, 32, colors.text);
-        nav_items[9].style.alignment = .center;
-        nav_items[9].style.radius = 4;
-        nav_items[9].style.background_color = if (model.pressed_edit == .confirm) colors.selected else colors.hover;
-        nav_items[10] = blank(4, null);
-        nav_items[11] = text("Cancel", 60, 32, colors.muted);
-        nav_items[11].style.alignment = .center;
-        if (model.pressed_edit == .cancel) nav_items[11].style.background_color = colors.selected;
-        nav_items[12] = blank(12, null);
-        nav_count = 13;
+    var nav_count: usize = 0;
+    if (compact_edit) {
+        nav_items[0] = blank(12, null);
+        nav_items[1] = crumb;
+        nav_count = 2;
     } else {
-        nav_items[8] = blank(4, null);
-        nav_items[9] = button(if (model.split) "Single" else "Split", .split, geometry, model);
-        nav_items[10] = blank(4, null);
-        nav_items[11] = button("More", .more, geometry, model);
-        nav_items[12] = blank(12, null);
-        nav_count = 13;
+        const nav_prefix = [_]View{ blank(12, null), button("<", .back, geometry, model, surface.legacy_text), blank(4, null), button(">", .forward, geometry, model, surface.legacy_text), blank(4, null), button("^", .up, geometry, model, surface.legacy_text), blank(12, null), crumb };
+        @memcpy(nav_items[0..nav_prefix.len], &nav_prefix);
+        nav_count = nav_prefix.len;
     }
+    nav_items[nav_count] = blank(4, null);
+    nav_count += 1;
+    if (model.edit != .none) {
+        nav_items[nav_count] = text(if (model.edit == .rename) "Save" else "Create", 64, 32, colors.text, surface.legacy_text);
+        nav_items[nav_count].style.alignment = .center;
+        nav_items[nav_count].style.radius = 4;
+        nav_items[nav_count] = nav_items[nav_count].smoothCorners();
+        nav_items[nav_count].style.background_color = if (model.pressed_edit == .confirm) colors.selected else colors.hover;
+        nav_count += 1;
+        nav_items[nav_count] = blank(4, null);
+        nav_count += 1;
+        nav_items[nav_count] = text("Cancel", 60, 32, colors.muted, surface.legacy_text);
+        nav_items[nav_count].style.alignment = .center;
+        nav_items[nav_count].style.radius = 4;
+        nav_items[nav_count] = nav_items[nav_count].smoothCorners();
+        if (model.pressed_edit == .cancel) nav_items[nav_count].style.background_color = colors.selected;
+        nav_count += 1;
+    } else {
+        if (geometry.canSplit()) {
+            nav_items[nav_count] = button(if (geometry.split) "Single" else "Split", .split, geometry, model, surface.legacy_text);
+            nav_count += 1;
+            nav_items[nav_count] = blank(4, null);
+            nav_count += 1;
+        }
+        nav_items[nav_count] = button("More", .more, geometry, model, surface.legacy_text);
+        nav_count += 1;
+    }
+    nav_items[nav_count] = blank(12, null);
+    nav_count += 1;
     var nav = ui.HStack(nav_items[0..nav_count]);
     nav.style = comptime ui.HStack(&.{}).frame(null, 40).@"align"(.center).material(materials.navigation).style;
-    var sidebar_children: [5]View = undefined;
-    var shortcut_children: [3][2]View = undefined;
-    sidebar_children[0] = text("Places", null, 20, colors.muted);
-    const shortcut_names = [_][]const u8{ "Home", "Documents", "Downloads" };
+    var sidebar_children: [6]View = undefined;
+    var shortcut_children: [4][2]View = undefined;
+    sidebar_children[0] = text("Places", null, 20, colors.muted, surface.legacy_text);
+    const shortcut_names = [_][]const u8{ "Home", "Documents", "Downloads", "Desktop" };
     for (shortcut_names, 0..) |name, index| {
         const shortcut: layout.Shortcut = @fromBackingInt(@intCast(index));
-        shortcut_children[index] = .{ blank(24, 16), text(name, null, 16, colors.text) };
+        const bounds = geometry.sidebar(shortcut);
+        const label_height = if (surface.legacy_text) @min(bounds.height, ui.font.line_height) else bounds.height;
+        shortcut_children[index] = .{ blank(32, 16), text(name, null, @intCast(label_height), colors.text, surface.legacy_text) };
         shortcut_children[index][1].style.flex_weight = 1;
         var item = ui.HStack(&shortcut_children[index]);
-        item.style = comptime ui.HStack(&.{}).frame(null, 32).padding(8).@"align"(.center).cornerRadius(4).style;
+        item.style = comptime ui.HStack(&.{}).frame(null, 32).@"align"(.center).cornerRadius(6).smoothCorners().style;
+        item.style.height = @intCast(bounds.height);
         const path = layout.shortcutPath(shortcut);
         if (std.mem.eql(u8, path, model.panes[model.focus].directory()) or model.pressed_shortcut == shortcut) item.style.background_color = colors.selected;
         if (model.drag) |drag| if (drag.moving and geometry.sidebar(shortcut).contains(model.pointer)) {
@@ -181,7 +277,7 @@ pub fn renderWithWorkspace(surface: *ui.Surface, workspace: *Workspace, model: *
         };
         sidebar_children[index + 1] = item;
     }
-    sidebar_children[4] = comptime ui.Spacer();
+    sidebar_children[5] = comptime ui.Spacer();
     var sidebar = ui.VStack(&sidebar_children);
     sidebar.style = comptime ui.VStack(&.{}).frame(148, null).padding(8).gap(4).material(materials.sidebar).style;
     sidebar.style.height = @intCast(geometry.pane_height);
@@ -189,15 +285,15 @@ pub fn renderWithWorkspace(surface: *ui.Surface, workspace: *Workspace, model: *
     var row_margins: [2][3]View = undefined;
     var pane_children: [2][2]View = undefined;
     var pane_views: [2]View = undefined;
-    const pane_count: usize = if (model.split) 2 else 1;
+    const pane_count: usize = if (geometry.split) 2 else 1;
     for (0..pane_count) |pane_index| {
         const pane = &model.panes[pane_index];
         const list_rect = geometry.list(pane_index);
-        column_children[pane_index] = .{ blank(8, 28), text(if (model.split) basename(pane.directory()) else "Name", null, 28, if (model.focus == pane_index) colors.text else colors.muted), text("Size", 64, 28, colors.muted), blank(8, 28) };
+        column_children[pane_index] = .{ blank(8, 28), text(if (geometry.split) basename(pane.directory()) else "Name", null, 28, if (model.focus == pane_index) colors.text else colors.muted, surface.legacy_text), text("Size", 64, 28, colors.muted, surface.legacy_text), blank(8, 28) };
         column_children[pane_index][1].style.flex_weight = 1;
-        column_children[pane_index][1].style.inset = 8;
+        column_children[pane_index][1].style.inset = @intCast(@min(8, (28 -| ui.font.line_height) / 2));
         column_children[pane_index][2].style.alignment = .end;
-        column_children[pane_index][2].style.inset = 8;
+        column_children[pane_index][2].style.inset = column_children[pane_index][1].style.inset;
         var column = ui.HStack(&column_children[pane_index]);
         column.style = comptime ui.HStack(&.{}).frame(null, 28).material(materials.columns).style;
         const visible = @min(geometry.visible_rows, pane.count - @min(pane.scroll, pane.count));
@@ -209,19 +305,19 @@ pub fn renderWithWorkspace(surface: *ui.Surface, workspace: *Workspace, model: *
             var unit: usize = 0;
             while (number >= 1024 and unit + 1 < units.len) : (unit += 1) number /= 1024;
             const size_text = if (entry.kind == .directory) "--" else try std.fmt.bufPrint(&workspace.sizes[pane_index][row], "{d} {s}", .{ number, units[unit] });
-            workspace.row_children[pane_index][row] = .{ blank(24, 28), text(entry.bytes(), @intCast(list_rect.width - 88), 28, colors.text), text(size_text, 64, 28, colors.muted) };
-            workspace.row_children[pane_index][row][1].style.inset = 8;
+            workspace.row_children[pane_index][row] = .{ blank(24, 28), text(entry.bytes(), @intCast(list_rect.width - 88), 28, colors.text, surface.legacy_text), text(size_text, 64, 28, colors.muted, surface.legacy_text) };
+            workspace.row_children[pane_index][row][1].style.inset = column_children[pane_index][1].style.inset;
             workspace.row_children[pane_index][row][2].style.alignment = .end;
-            workspace.row_children[pane_index][row][2].style.inset = 8;
+            workspace.row_children[pane_index][row][2].style.inset = column_children[pane_index][1].style.inset;
             var item = ui.HStack(&workspace.row_children[pane_index][row]);
-            item.style = comptime ui.HStack(&.{}).frame(null, 28).cornerRadius(3).style;
+            item.style = comptime ui.HStack(&.{}).frame(null, 28).cornerRadius(8).smoothCorners().style;
             if (pane.selected == index) item.style.background_color = colors.selected;
             if (model.drag) |drag| if (drag.moving and entry.kind == .directory and geometry.row(pane_index, row).contains(model.pointer) and (drag.pane != pane_index or drag.index != index)) {
                 item.style.background_color = colors.drop;
             };
             workspace.rows[pane_index][row] = item;
         }
-        if (visible == 0) workspace.rows[pane_index][0] = text("This folder is empty", null, 28, colors.muted);
+        if (visible == 0) workspace.rows[pane_index][0] = text("This folder is empty", null, 28, colors.muted, surface.legacy_text);
         const used = if (visible == 0) @as(usize, 1) else visible;
         workspace.rows[pane_index][used] = comptime ui.Spacer();
         var rows = ui.VStack(workspace.rows[pane_index][0 .. used + 1]);
@@ -239,7 +335,7 @@ pub fn renderWithWorkspace(surface: *ui.Surface, workspace: *Workspace, model: *
         pane_views[pane_index].style.width = @intCast(geometry.pane_width);
         pane_views[pane_index].style.height = @intCast(geometry.pane_height);
     }
-    // Rows occupy pane width, while text has eight-pixel column insets. Icon and
+    // Rows occupy pane width; text insets leave a complete font line. Icon and
     // selection hit coordinates follow Geometry, with row edges inset explicitly.
     var panes = ui.HStack(pane_views[0..pane_count]);
     panes.style = comptime ui.HStack(&.{}).gap(1).style;
@@ -268,7 +364,8 @@ pub fn renderWithWorkspace(surface: *ui.Surface, workspace: *Workspace, model: *
             count += 1;
             column += 1;
         }
-        preview_children = .{ text(model.preview_name[0..model.preview_name_len], null, 24, colors.text), text("Read-only preview  /  Escape closes", null, 16, colors.muted), text(if (count == 0) "Empty file" else workspace.preview_text[0..count], null, @intCast(geometry.pane_height - 72), colors.text), comptime ui.Spacer() };
+        preview_children = .{ text(model.preview_name[0..model.preview_name_len], null, 24, colors.text, surface.legacy_text), text("Read-only preview  /  Escape closes", null, 16, colors.muted, surface.legacy_text), text(if (count == 0) "Empty file" else workspace.preview_text[0..count], null, @intCast(geometry.pane_height - 72), colors.text, surface.legacy_text), comptime ui.Spacer() };
+        if (!surface.legacy_text) preview_children[2].style.text_vertical_alignment = .start;
         content = ui.VStack(&preview_children);
         content.style = comptime ui.VStack(&.{}).padding(12).gap(4).style;
         content.style.width = @intCast(surface.width - layout.sidebar_width);
@@ -282,17 +379,17 @@ pub fn renderWithWorkspace(surface: *ui.Surface, workspace: *Workspace, model: *
     body.style.height = @intCast(geometry.pane_height);
     const menu_hover: ?layout.Action = if (model.menu) |menu| (if (menu.hovered) |index| layout.menuActions(menu.kind)[index] else null) else null;
     const status = if (model.status_error or model.status_notice or model.edit != .none) model.statusText() else if (menu_hover orelse model.hovered_action) |action| help(action) else try std.fmt.bufPrint(&workspace.footer, "{d} {s}{s}{s}", .{ model.panes[model.focus].count, if (model.panes[model.focus].count == 1) "item" else "items", if (model.panes[model.focus].truncated) " / first 32" else "", if (model.clipboard != null) " / clipboard ready" else "" });
-    var footer = text(status, null, 24, if (model.status_error) colors.error_color else colors.muted);
-    footer.style.inset = 7;
+    var footer = text(status, null, 24, if (model.status_error) colors.error_color else colors.muted, surface.legacy_text);
+    footer.style.inset = @intCast(@min(7, (24 -| ui.font.line_height) / 2));
     footer = footer.material(materials.footer);
     const root_children = [_]View{ nav, body, footer };
     var root = ui.VStack(&root_children);
     root = root.material(materials.client);
     try ui.renderWithWorkspace(surface, &workspace.axisui, root);
-    for (0..3) |index| {
+    for (0..4) |index| {
         const shortcut: layout.Shortcut = @fromBackingInt(@intCast(index));
         const rect = geometry.sidebar(shortcut);
-        try ui.drawIcon(surface, if (shortcut == .home) .home else .folder, .{ .x = rect.x + 8, .y = rect.y + 8 }, if (shortcut == .home) colors.accent else colors.folder, 1);
+        try ui.drawIcon(surface, if (shortcut == .home) .home else .folder, .{ .x = rect.x + 8, .y = rect.y + @as(i32, @intCast((rect.height - 16) / 2)) }, if (shortcut == .home) colors.accent else colors.folder, 1);
     }
     if (!model.preview_open) for (0..pane_count) |pane_index| {
         const pane = &model.panes[pane_index];
@@ -306,6 +403,21 @@ pub fn renderWithWorkspace(surface: *ui.Surface, workspace: *Workspace, model: *
     if (model.menu) |menu| try renderMenu(surface, workspace, model, menu.kind, menu.anchor);
 }
 
+/// Repaint app-owned trailing controls after a custom menu background. Their
+/// shared layout still drives hit testing; this never paints trusted captions.
+pub fn renderWindowActionsWithWorkspace(surface: *ui.Surface, workspace: *Workspace, model: *const Model) !void {
+    if (model.edit != .none) return;
+    const geometry = try layout.Geometry.initMode(surface.width, surface.height - layout.window_header_height, model.split);
+    for ([_]layout.Action{ .split, .more }) |action| {
+        const rect = geometry.button(action);
+        if (rect.width == 0 or rect.height == 0) continue;
+        var overlay: Overlay = .{ .parent = surface, .origin = .{ .x = rect.x, .y = rect.y + layout.window_header_height } };
+        var clipped = try ui.Surface.initCommands(rect.width, rect.height, overlay.sink());
+        const label = if (action == .more) "More" else if (model.split) "Single" else "Split";
+        try ui.renderWithWorkspace(&clipped, &workspace.axisui, button(label, action, geometry, model, false));
+    }
+}
+
 pub fn menuLabel(action: layout.Action) []const u8 {
     return switch (action) {
         .open => "Open",
@@ -316,7 +428,7 @@ pub fn menuLabel(action: layout.Action) []const u8 {
         .paste => "Paste",
         .rename => "Rename",
         .remove => "Delete",
-        .nullify => "Nullify (overwrite + delete)",
+        .nullify => "Nullify (zero + delete)",
         .refresh => "Refresh",
         .split => "Split view",
         else => "",
@@ -327,6 +439,9 @@ pub fn menuLabel(action: layout.Action) []const u8 {
 const Overlay = struct {
     parent: *ui.Surface,
     origin: ui.Point,
+    fn sink(self: *Overlay) ui.CommandSink {
+        return .{ .context = self, .fillRect = fill, .materialRect = material, .materialPixel = materialPixel, .blendPixel = blend };
+    }
     fn fill(context: *anyopaque, x: u32, y: u32, width: u32, height: u32, pixel: u32) void {
         const self: *Overlay = @ptrCast(@alignCast(context));
         const color = Color.rgb(@intCast((pixel >> 16) & 255), @intCast((pixel >> 8) & 255), @intCast(pixel & 255));
@@ -336,21 +451,32 @@ const Overlay = struct {
         const self: *Overlay = @ptrCast(@alignCast(context));
         self.parent.materialRect(@as(u32, @intCast(self.origin.x)) + x, @as(u32, @intCast(self.origin.y)) + y, width, height, value);
     }
+    fn blend(context: *anyopaque, x: u32, y: u32, pixel: u32, coverage: u8) void {
+        const self: *Overlay = @ptrCast(@alignCast(context));
+        const color = Color.rgb(@intCast((pixel >> 16) & 255), @intCast((pixel >> 8) & 255), @intCast(pixel & 255));
+        self.parent.blendPixel(@as(u32, @intCast(self.origin.x)) + x, @as(u32, @intCast(self.origin.y)) + y, color, coverage);
+    }
+    fn materialPixel(context: *anyopaque, x: u32, y: u32, value: ui.Material, coverage: u8) void {
+        const self: *Overlay = @ptrCast(@alignCast(context));
+        self.parent.materialPixel(@as(u32, @intCast(self.origin.x)) + x, @as(u32, @intCast(self.origin.y)) + y, value, coverage);
+    }
 };
 fn renderMenu(surface: *ui.Surface, workspace: *Workspace, model: *const Model, kind: layout.MenuKind, anchor: ui.Point) !void {
     const bounds = try layout.MenuGeometry.init(surface.width, surface.height, kind, anchor);
     const actions = layout.menuActions(kind);
     for (actions, 0..) |action, i| {
         const enabled = model.menuEnabled(action);
-        var row = text(if (action == .split and model.split) "Single view" else menuLabel(action), null, layout.menu_row_height, if (!enabled) colors.muted else if (action == .nullify) colors.error_color else colors.text);
-        row.style.inset = 8;
-        row.style.radius = 3;
+        var row = text(if (action == .split and model.split) "Single view" else menuLabel(action), null, @intCast(bounds.row_height), if (!enabled) colors.muted else if (action == .nullify) colors.error_color else colors.text, surface.legacy_text);
+        row.style.inset = @intCast(@min(if (bounds.row_height < layout.menu_row_height) @as(u32, 4) else 8, (bounds.row_height -| ui.font.line_height) / 2));
+        row.style.radius = 4;
+        row = row.smoothCorners();
         if (enabled and model.menu.?.pressed == i) row.style.background_color = colors.selected else if (enabled and model.menu.?.hovered == i) row.style.background_color = colors.hover;
         workspace.menu_rows[i] = row;
     }
     var popup = ui.VStack(workspace.menu_rows[0..actions.len]);
-    popup.style = comptime ui.VStack(&.{}).padding(4).cornerRadius(6).border(colors.border, 1).material(materials.menu).style;
+    popup.style = comptime ui.VStack(&.{}).padding(4).cornerRadius(6).smoothCorners().border(colors.border, 1).material(materials.menu).style;
     var overlay: Overlay = .{ .parent = surface, .origin = .{ .x = bounds.rect.x, .y = bounds.rect.y } };
-    var clipped = try ui.Surface.initCommands(bounds.rect.width, bounds.rect.height, .{ .context = &overlay, .fillRect = Overlay.fill, .materialRect = Overlay.material });
+    var clipped = try ui.Surface.initCommands(bounds.rect.width, bounds.rect.height, overlay.sink());
+    clipped.legacy_text = surface.legacy_text;
     try ui.renderWithWorkspace(&clipped, &workspace.axisui, popup);
 }

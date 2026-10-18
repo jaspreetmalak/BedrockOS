@@ -260,26 +260,33 @@ pub fn ProcessTable(comptime capacity: usize) type {
             return count;
         }
 
-        /// Existing zombies may be selected by deferred completion while the
-        /// parent is ready. Blocking a wait requires a running parent.
-        pub fn wait(self: *Self, parent_pid: Pid, selected: ?Pid) Error!WaitResult {
+        /// Nonblocking inspection preserves scheduling and does not consume a
+        /// zombie. Only the actual parent can select or later reap its child.
+        pub fn pollWait(self: *const Self, parent_pid: Pid, selected: ?Pid) Error!?ExitRecord {
             const parent_index = try self.slot(parent_pid);
             if (!alive(self.entries[parent_index].state)) return error.ParentNotAlive;
             if (selected) |child| {
                 const index = try self.slot(child);
                 if (self.entries[index].parent != parent_pid) return error.NotChild;
                 if (self.entries[index].state == .zombie)
-                    return .{ .ready = .{ .pid = child, .status = self.entries[index].status.? } };
+                    return .{ .pid = child, .status = self.entries[index].status.? };
             } else {
                 var found = false;
-                for (&self.entries, 0..) |*entry, index| {
+                for (self.entries, 0..) |entry, index| {
                     if (entry.state == .free or entry.parent != parent_pid) continue;
                     found = true;
                     if (entry.state == .zombie)
-                        return .{ .ready = .{ .pid = encode(index, entry.generation), .status = entry.status.? } };
+                        return .{ .pid = encode(index, entry.generation), .status = entry.status.? };
                 }
                 if (!found) return error.NoChildren;
             }
+            return null;
+        }
+
+        /// Existing zombies may be selected by deferred completion while the
+        /// parent is ready. Blocking a wait requires a running parent.
+        pub fn wait(self: *Self, parent_pid: Pid, selected: ?Pid) Error!WaitResult {
+            if (try self.pollWait(parent_pid, selected)) |record| return .{ .ready = record };
             try self.block(parent_pid, .{ .wait_child = selected });
             return .blocked;
         }
@@ -683,4 +690,30 @@ test "trusted init failure stops live children and preserves prior zombies" {
     try t.expectEqual(@as(?Pid, null), try table.dispatch());
     try t.expectError(error.ParentNotAlive, table.spawn(init));
     try t.expectError(error.InitUnavailable, table.failInit(.{ .code = 139, .faulted = true }));
+}
+
+test "nonblocking child wait preserves scheduling and parent authority" {
+    const t = std.testing;
+    var table: ProcessTable(4) = .{};
+    const init = try table.spawn(null);
+    const child = try table.spawn(init);
+    const other = try table.spawn(init);
+    const grandchild = try table.spawn(other);
+    try t.expectEqual(init, (try table.dispatch()).?);
+    const running = table;
+    try t.expectEqual(@as(?ExitRecord, null), try table.pollWait(init, child));
+    try t.expectEqualDeep(running, table);
+    try t.expectError(error.NotChild, table.pollWait(init, grandchild));
+    try t.expectEqualDeep(running, table);
+    try table.exit(child, .{ .code = 23 });
+    const exited = table;
+    const first = (try table.pollWait(init, null)).?;
+    try t.expectEqual(child, first.pid);
+    try t.expectEqual(@as(u64, 23), first.status.code);
+    try t.expectEqualDeep(exited, table);
+    try t.expectEqual(first, (try table.pollWait(init, child)).?);
+    _ = try table.reap(init, child);
+    try t.expectError(error.StalePid, table.pollWait(init, child));
+    try t.expectEqual(@as(?ExitRecord, null), try table.pollWait(init, null));
+    try t.expectEqual(State.running, try table.state(init));
 }

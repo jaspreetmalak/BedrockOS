@@ -3,6 +3,14 @@ const builtin = @import("builtin");
 pub const abi = @import("bedrock64");
 pub const network = @import("network.zig");
 pub const wifi = @import("wifi.zig");
+pub const startup_record = @import("startup.zig");
+pub const Heap = @import("heap.zig").Heap;
+pub const display_wire = @import("display_wire.zig");
+pub const desktop_wire = @import("desktop_wire.zig");
+pub const desktop_client = @import("desktop_client.zig");
+pub const window_wire = @import("window_wire.zig");
+pub const window_client = @import("window_client.zig");
+pub const window_header = @import("window_header");
 export var bedrock_user_entry_count: u64 = 0;
 
 pub fn markEntry() void {
@@ -63,6 +71,87 @@ pub noinline fn close(fd: u64) u64 {
 
 pub noinline fn spawnPath(path: []const u8, launch_arg: u64) u64 {
     return syscall(abi.syscall.spawn_path, @intFromPtr(path.ptr), path.len, launch_arg);
+}
+
+/// Only a trusted launcher may select an installed application's identity.
+pub noinline fn spawnApp(package_id: u64, launch_arg: u64, pipe_writer: u64) u64 {
+    return syscall(abi.syscall.spawn_app, package_id, launch_arg, pipe_writer);
+}
+pub noinline fn waitPoll(pid: u64) u64 {
+    return syscall(abi.syscall.wait, pid, abi.wait_flags.nohang, 0);
+}
+
+/// Read firmware calendar time advanced by observed timer quanta. Success can
+/// still report !output.isAvailable(); do not invent a time for that case.
+pub noinline fn clockRead(output: *abi.ClockTime) u64 {
+    return syscall(abi.syscall.clock_read, @intFromPtr(output), 0, 0);
+}
+
+pub noinline fn surfaceCreate(request: *const abi.SurfaceCreate) u64 {
+    return syscall(abi.syscall.surface_create, @intFromPtr(request), 0, 0);
+}
+pub noinline fn surfaceMap(token: u64, slot: u64, writable: bool) u64 {
+    return syscall(abi.syscall.surface_map, token, slot, @intFromBool(writable));
+}
+pub noinline fn surfaceUnmap(token: u64) u64 {
+    return syscall(abi.syscall.surface_unmap, token, 0, 0);
+}
+pub noinline fn surfaceSubmit(token: u64, endpoint: u64, sequence: u64) u64 {
+    return syscall(abi.syscall.surface_submit, token, endpoint, sequence);
+}
+pub noinline fn surfaceRelease(token: u64) u64 {
+    return syscall(abi.syscall.surface_release, token, 0, 0);
+}
+pub noinline fn surfaceClose(token: u64) u64 {
+    return syscall(abi.syscall.surface_close, token, 0, 0);
+}
+pub noinline fn serviceOpen(name: u64) u64 {
+    return syscall(abi.syscall.service_open, name, 0, 0);
+}
+pub noinline fn serviceConnect(name: u64) u64 {
+    return syscall(abi.syscall.service_connect, name, 0, 0);
+}
+pub noinline fn serviceSend(endpoint: u64, message: *const abi.ServiceMessage) u64 {
+    return syscall(abi.syscall.service_send, endpoint, @intFromPtr(message), @sizeOf(abi.ServiceMessage));
+}
+pub noinline fn serviceReceive(endpoint: u64, message: *abi.ServiceMessage) u64 {
+    return syscall(abi.syscall.service_receive, endpoint, @intFromPtr(message), @sizeOf(abi.ServiceMessage));
+}
+pub noinline fn serviceClose(endpoint: u64) u64 {
+    return syscall(abi.syscall.service_close, endpoint, 0, 0);
+}
+pub noinline fn displayPresent(request: *const abi.PresentRequest) u64 {
+    return syscall(abi.syscall.display_present, @intFromPtr(request), 0, 0);
+}
+pub noinline fn displayInfo(info: *abi.DisplayInfo) u64 {
+    return syscall(abi.syscall.display_info, @intFromPtr(info), 0, 0);
+}
+pub noinline fn displayInput(event: *abi.DisplayInput) u64 {
+    return syscall(abi.syscall.display_input, @intFromPtr(event), 0, 0);
+}
+pub noinline fn desktopState(state: u64) u64 {
+    return syscall(abi.syscall.desktop_state, state, 0, 0);
+}
+
+pub noinline fn windowState(state: u64, app_id: u64, auxiliary: u64) u64 {
+    return syscall(abi.syscall.window_state, state, app_id, auxiliary);
+}
+
+/// Installed programs read a kernel-authored RO/NX startup page. Legacy
+/// fixture programs receive errno.not_supported from startup_info.
+pub fn startup(parent: u64, inherited_token: u64, launch_arg: u64) startup_record.Error!*const abi.Startup {
+    const address = syscall(abi.syscall.startup_info, 0, 0, 0);
+    if (address != abi.application.startup_address) return error.InvalidStartupHeader;
+    const result: *const abi.Startup = @ptrFromInt(address);
+    try startup_record.validateEntry(result, parent, inherited_token, launch_arg);
+    return result;
+}
+
+/// Call only after validating Startup. This lease belongs to this process and
+/// is reclaimed by the kernel on exit, fault or successful exec.
+pub fn appHeap(info: *const abi.Startup) Heap {
+    const bytes: [*]u8 = @ptrFromInt(info.heap_base);
+    return Heap.init(bytes[0..@intCast(info.heap_length)]);
 }
 
 /// Failure returns errno. A successful replacement enters the new ELF image.
@@ -180,18 +269,23 @@ pub fn boundaryReturn() noreturn {
 
 /// Emit an actual architectural null load, never a compiler-generated trap.
 pub fn invalidRead() noreturn {
+    invalidReadAt(0);
+}
+
+/// Used by protected resource tests to access an explicitly revoked mapping.
+pub fn invalidReadAt(address: u64) noreturn {
     _ = switch (builtin.cpu.arch) {
         .x86_64 => asm volatile ("movq (%[address]), %[value]"
             : [value] "=r" (-> u64),
-            : [address] "r" (@as(u64, 0)),
+            : [address] "r" (address),
             : .{ .memory = true }),
         .aarch64 => asm volatile ("ldr %[value], [%[address]]"
             : [value] "=r" (-> u64),
-            : [address] "r" (@as(u64, 0)),
+            : [address] "r" (address),
             : .{ .memory = true }),
         .riscv64 => asm volatile ("ld %[value], 0(%[address])"
             : [value] "=r" (-> u64),
-            : [address] "r" (@as(u64, 0)),
+            : [address] "r" (address),
             : .{ .memory = true }),
         else => unreachable,
     };

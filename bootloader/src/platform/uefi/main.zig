@@ -7,9 +7,12 @@ const memory = @import("memory.zig");
 const serial = @import("uart.zig");
 const paging = @import("paging.zig");
 const elf = @import("elf_loader");
+const wifi_assets = @import("wifi_assets.zig");
+const driver_assets = @import("driver_assets.zig");
+const app_assets = @import("app_assets.zig");
 const kernel_image = @embedFile("kernel_image");
 const loader_capacity = 0x200000;
-const kernel_capacity = 0x200000;
+const kernel_capacity = 0x400000;
 const raw_map_offset = 0x40000;
 const raw_map_capacity = 0x40000;
 const page_tables_offset = 0x80000;
@@ -172,6 +175,8 @@ fn prepareMappings(map: uefi.tables.MemoryMapSlice, info: *protocol.BootInfo, ph
             }
             if (address == 0) continue;
             const registers: protocol.PhysicalRange = .{ .base = address, .length = 0x4000 };
+            if (info.apps.reservation.length != 0 and address < try info.apps.reservation.endExclusive() and
+                info.apps.reservation.base < try registers.endExclusive()) return error.PciBarOverlapsAppArchive;
             for (info.memory_regions[0..info.memory_region_count]) |region| {
                 if (region.kind == @backingInt(protocol.MemoryKind.usable) and region.range.base < try registers.endExclusive() and address < try region.range.endExclusive())
                     return error.PciBarOverlapsRam;
@@ -287,6 +292,45 @@ fn run(bs: *uefi.tables.BootServices) !noreturn {
         .acpi_rsdp = rsdpAddress(),
         .framebuffer = graphics,
     };
+    var wifi = wifi_assets.stage(bs, uefi.handle, address_limit) catch |err| failed: {
+        log("[bootloader] Wi-Fi assets unavailable: ");
+        log(@errorName(err));
+        log("\n");
+        break :failed wifi_assets.Outcome{};
+    };
+    defer if (!exit_attempted) {
+        if (wifi.assets) |*assets| assets.release(bs) catch {};
+    };
+    if (wifi.assets) |*assets| assets.publish(&info.wifi);
+    logWifiAssets(wifi);
+    var driver = driver_assets.stage(bs, uefi.handle, .x86_64, address_limit, options.driver_acceptance) catch |err| failed: {
+        log("[bootloader] driver module rejected: ");
+        log(@errorName(err));
+        log("\n");
+        break :failed null;
+    };
+    defer if (!exit_attempted) {
+        if (driver) |*value| value.release(bs) catch {};
+    };
+    if (driver) |value| {
+        info.drivers.count = 1;
+        info.drivers.records[0] = value.record;
+        log("[bootloader] matching driver module staged\n");
+    }
+    var apps = app_assets.stage(bs, uefi.handle, .x86_64, address_limit) catch |err| failed: {
+        log("[bootloader] application archive rejected: ");
+        log(@errorName(err));
+        log("\n");
+        break :failed null;
+    };
+    defer if (!exit_attempted) {
+        if (apps) |*value| value.release(bs) catch {};
+    };
+    if (apps) |value| {
+        info.apps = value.record;
+        log("[bootloader] application archive staged\n");
+    }
+    info.wall_clock = @import("wall_clock.zig").capture(uefi.system_table);
     // Emit the last firmware diagnostic before the final map/key acquisition.
     const initial_map = try bs.getMemoryMap(buffer);
     try memory.populate(initial_map, info);
@@ -312,6 +356,20 @@ fn run(bs: *uefi.tables.BootServices) !noreturn {
         jump(context);
     }
     return error.ExitBootServicesRetryLimit;
+}
+fn logWifiAssets(outcome: wifi_assets.Outcome) void {
+    log(if (outcome.firmware == .ready) "[bootloader] Wi-Fi firmware assets verified\n" else "[bootloader] Wi-Fi firmware assets absent\n");
+    if (outcome.firmware != .ready) return;
+    log(switch (outcome.entropy) {
+        .ready => "[bootloader] Wi-Fi EFI RNG seed acquired\n",
+        .unavailable => "[bootloader] Wi-Fi EFI RNG unavailable\n",
+        .failed => "[bootloader] Wi-Fi EFI RNG failed\n",
+    });
+    log(switch (outcome.profile) {
+        .ready => "[bootloader] Wi-Fi board profile validated\n",
+        .absent => "[bootloader] Wi-Fi board profile absent\n",
+        .invalid => "[bootloader] Wi-Fi board profile rejected\n",
+    });
 }
 pub fn main() uefi.Status {
     if (options.smoke_test) serial.init();

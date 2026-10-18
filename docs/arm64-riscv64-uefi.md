@@ -20,7 +20,9 @@ Installed removable-media paths are
 `zig-out/uefi/arm64/EFI/BOOT/BOOTAA64.EFI` and
 `zig-out/uefi/riscv64/EFI/BOOT/BOOTRISCV64.EFI`. A separately compiled PIE kernel
 is embedded in each application and installed as `kernel.elf` by `images`.
-RV64 requires Python 3.8+ on the host: Zig 0.17 cannot emit RV64 COFF, so a
+The primary images include `EFI/Bedrock/Apps/apps.bap` for installed init,
+compositor, shell and Files. Archive/image packaging requires Python 3.9+.
+RV64 also uses Python: Zig 0.17 cannot emit RV64 COFF, so a
 bounded converter preserves the ELF loader's RVAs and converts symbol-free
 relative relocations to PE32+ DIR64 records, with machine type `0x5064`.
 
@@ -32,22 +34,24 @@ The RV64 reference uses `virt`, `rv64`, bundled OpenSBI, EDK2, and one hart.
 Both disable ACPI in these reference tests to exercise firmware DTB discovery.
 The RV64 reset reference continues to run without OpenSBI.
 Normal run commands add QEMU's `ramfb` device, which provides a linear GOP
-framebuffer in the installed firmware. Both normal framebuffer paths were
-captured and visually verified through kernel boot completion and idle.
+framebuffer in the installed firmware. Primary runs use at least 256 MiB RAM
+and start the installed native [service desktop](service-desktop.md). Its
+`test-service-desktop-arm64` and `test-service-desktop-riscv64` workflows check
+actual pixels, input, window controls and durable storage across fresh boots.
 The smoke matrix stays on UART. Firmware exposing only `PixelBltOnly`, including
 the installed virtio GPU driver, falls back to the described UART.
 
 ## Memory and firmware lifetime
 
 The loader requests a 2 MiB executable arena from firmware, then enough kernel
-pages for a 2 MiB PIE span and its alignment. Allocations may land in separate
+pages for a 4 MiB PIE span and its alignment. Allocations may land in separate
 RAM banks. `-Duefi-kernel-min=<decimal address>` selects a minimum address for
 deterministic placement tests. Every ELF segment and relocation is checked before
 the destination changes; only symbol-free architecture-relative RELA is accepted.
 
 | Loader-relative area | Bounds |
 | --- | --- |
-| Handoff v0.2 | Offset 0; 2,816 bytes |
+| Handoff v0.6 | Offset 0; 4,136 bytes |
 | Exact EFI memory descriptors | `0x40000..0x80000` |
 | Owned DTB copy | `0x80000..0x100000` |
 | Copied CPU transition | `0x180000..0x190000` |

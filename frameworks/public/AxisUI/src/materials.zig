@@ -8,6 +8,48 @@ pub const step: u32 = 8;
 pub const radius: u32 = 24;
 const grid_radius: i64 = radius / step;
 
+/// Restrained dark glass presets. They are ordinary tint/opacity materials;
+/// the caller still chooses an immutable, authority-appropriate backdrop.
+pub const glass = struct {
+    pub const window: Material = .{ .tint = Color.rgb(24, 29, 40), .opacity = 136 };
+    pub const sidebar: Material = .{ .tint = Color.rgb(22, 27, 38), .opacity = 104 };
+    pub const control: Material = .{ .tint = Color.rgb(38, 45, 59), .opacity = 124 };
+    pub const edge = Color.rgb(214, 224, 242);
+    pub const edge_opacity: u8 = 42;
+};
+
+/// Four-by-four subpixel coverage of a rounded rectangle. Coordinates are
+/// relative pixels, bounds are half-open, and radius clamps to half the smaller
+/// extent. Only integer arithmetic is used, including for oversized geometry.
+pub fn roundedCoverage(width: u32, height: u32, corner_radius: u32, x: i64, y: i64) u8 {
+    if (x < 0 or y < 0 or x >= width or y >= height) return 0;
+    const r = @min(corner_radius, @min(width, height) / 2);
+    if (r == 0) return 255;
+    const lx: u64 = @intCast(x);
+    const ly: u64 = @intCast(y);
+    if ((lx >= r and lx < width - r) or (ly >= r and ly < height - r)) return 255;
+    const qx = @min(lx, width - 1 - lx);
+    const qy = @min(ly, height - 1 - ly);
+    const center = @as(u64, r) * 8;
+    var count: u32 = 0;
+    inline for (.{ 1, 3, 5, 7 }) |sample_y| {
+        const dy = center - (qy * 8 + sample_y);
+        inline for (.{ 1, 3, 5, 7 }) |sample_x| {
+            const dx = center - (qx * 8 + sample_x);
+            // u128 keeps arbitrary u32 geometry defined; actual Surface bounds
+            // are much smaller and the common interior returns above.
+            if (@as(u128, dx) * dx + @as(u128, dy) * dy <= @as(u128, center) * center) count += 1;
+        }
+    }
+    return @intCast((count * 255 + 8) / 16);
+}
+
+/// The same rounded geometry for pointer picking; a pixel belongs to the shape
+/// when at least half its area is covered. No neighboring pixels are consulted.
+pub fn roundedContains(width: u32, height: u32, corner_radius: u32, x: i64, y: i64) bool {
+    return roundedCoverage(width, height, corner_radius, x, y) >= 128;
+}
+
 pub const Backdrop = struct {
     /// Standard0x00RRGGBB values, independent of the source/destination masks.
     /// Width/height are full-resolution extents; stride is sampled-grid columns.

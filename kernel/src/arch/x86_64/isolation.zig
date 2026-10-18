@@ -5,6 +5,7 @@ const std = @import("std");
 const protocol = @import("boot_protocol");
 const contract = @import("isolation_contract");
 const memory = @import("memory_init");
+const page_table_entry = @import("page_table_entry.zig");
 
 const page: u64 = 4096;
 const large_page: u64 = 0x200000;
@@ -90,6 +91,9 @@ const Space = struct {
     state: SpaceState = .free,
     tables: TableLedger = .{},
     task: contract.TaskMemory = undefined,
+    table_limit: usize = max_tables,
+    shared: [contract.shared_surface_slots]contract.SharedMapping = @splat(.{}),
+    shared_tables: [contract.shared_surface_slots][2]u64 = @splat(@splat(0)),
 };
 var spaces: [max_spaces]Space = @splat(.{});
 // Root frames can move between slots. Issue generations globally, never wrap,
@@ -250,6 +254,11 @@ const Builder = struct {
         try result.protect(sections.text_start, sections.text_end, 0);
         try result.protect(sections.rodata_start, sections.rodata_end, nx);
         try result.protect(sections.data_start, sections.data_end, writable | nx);
+        if (boot.apps.reservation.length != 0)
+            try result.protect(boot.apps.reservation.base, try boot.apps.reservation.endExclusive(), nx);
+        for (boot.drivers.records[0..boot.drivers.count]) |driver|
+            for (driver.segments[0..driver.segment_count]) |segment|
+                try result.protect(segment.range.base, try segment.range.endExclusive(), (if (segment.flags & 2 != 0) writable else @as(u64, 0)) | (if (segment.flags & 1 == 0) nx else @as(u64, 0)));
         try result.unmap(sections.stack_guard);
         try result.unmap(trap_guard);
         try result.unmap(emergency_guard);
@@ -302,7 +311,20 @@ fn auditKernel(root: u64, private_code: ?protocol.PhysicalRange) !void {
             const in_text = address >= sections.text_start and address < sections.text_end;
             const read_only = in_text or (address >= sections.rodata_start and address < sections.rodata_end) or
                 (private_code != null and address >= private_code.?.base and address - private_code.?.base < private_code.?.length);
-            if (found.physical != address or found.is_user or found.execute != in_text or found.write == read_only or
+            var expected_execute = in_text;
+            var expected_write = !read_only;
+            if (boot.apps.reservation.length != 0 and address >= boot.apps.reservation.base and address - boot.apps.reservation.base < boot.apps.reservation.length) {
+                expected_execute = false;
+                expected_write = false;
+            }
+            for (boot.drivers.records[0..boot.drivers.count]) |driver|
+                for (driver.segments[0..driver.segment_count]) |segment| {
+                    if (address >= segment.range.base and address - segment.range.base < segment.range.length) {
+                        expected_execute = segment.flags & 1 != 0;
+                        expected_write = segment.flags & 2 != 0;
+                    }
+                };
+            if (found.physical != address or found.is_user or found.execute != expected_execute or found.write != expected_write or
                 found.cache != (try source(address)).cache) return error.InvalidKernelPermissions;
             const next = (address & ~(found.bytes - 1)) + found.bytes;
             address = @min(next, end);
@@ -312,22 +334,16 @@ fn auditKernel(root: u64, private_code: ?protocol.PhysicalRange) !void {
     for (guarded) |address| if (try mapped(root, address) != null) return error.MappedKernelGuard;
 }
 
-fn auditUser(root: u64, task: contract.TaskMemory) !void {
+fn auditUser(root: u64, task: contract.TaskMemory, shared: []const contract.SharedMapping) !void {
     var virtual = user_base;
     while (virtual < user_end) : (virtual += page) {
         const found = try mapped(root, virtual);
-        var expected: ?contract.Mapping = null;
-        for (task.mappings()) |mapping| {
-            if (virtual >= mapping.virtual and virtual - mapping.virtual < @as(u64, mapping.pages) * page) {
-                expected = mapping;
-                break;
-            }
-        }
+        const expected = contract.userMapping(task, shared, virtual);
         if (expected) |mapping| {
             const leaf = found orelse return error.MissingUserMapping;
             const physical = mapping.physical + virtual - mapping.virtual;
             if (leaf.physical != physical or leaf.bytes != page or !leaf.is_user or
-                leaf.write != mapping.writable or leaf.execute == mapping.writable or
+                leaf.write != mapping.writable or leaf.execute != mapping.executable or
                 leaf.cache != (try source(physical)).cache) return error.InvalidUserPermissions;
         } else if (found != null) return error.UnexpectedUserMapping;
     }
@@ -356,6 +372,7 @@ pub fn prepare(info: *const protocol.BootInfo, layout: contract.KernelLayout) !v
     if (info.boot_environment != @backingInt(protocol.BootEnvironment.uefi) or info.mapped_range_count == 0)
         return error.UnsupportedIsolationEnvironment;
     if (!bedrock_x86_nx_supported()) return error.ExecuteDisableUnavailable;
+    try contract.validateKernelStack(layout);
     if (info.physical_address_bits < 32 or info.physical_address_bits > 52) return error.InvalidPhysicalWidth;
     physical_limit = @min(@as(u64, 1) << 47, @as(u64, 1) << @as(u6, @intCast(info.physical_address_bits)));
     for (info.mapped_ranges[0..info.mapped_range_count]) |range| {
@@ -373,7 +390,7 @@ pub fn prepare(info: *const protocol.BootInfo, layout: contract.KernelLayout) !v
     sections = layout;
     original_root = bedrock_arch_cr3() & address_mask;
     const allocator = memory.allocator() orelse return error.MemoryNotInitialized;
-    const trap = (try allocator.allocateContiguous(9, 1)) orelse return error.OutOfMemory;
+    const trap = (try allocator.allocateContiguous(contract.kernel_dispatch_stack_pages + 1, 1)) orelse return error.OutOfMemory;
     errdefer allocator.releaseContiguous(trap) catch @panic("x86 trap stack rollback failed");
     const emergency = (try allocator.allocateContiguous(3, 1)) orelse return error.OutOfMemory;
     errdefer allocator.releaseContiguous(emergency) catch @panic("x86 emergency stack rollback failed");
@@ -403,15 +420,21 @@ pub fn createWithTableLimit(task: contract.TaskMemory, table_limit: usize) !cont
     if (table_limit > max_tables) return error.InvalidPageTableCapacity;
     if (next_space_generation == 0) return error.AddressSpaceGenerationExhausted;
     try task.validate();
-    for (task.mappings()) |mapping| {
+    for (task.allMappings()) |mapping| {
+        if (mapping.pages == 0) continue;
         const range: protocol.PhysicalRange = .{ .base = mapping.physical, .length = @as(u64, mapping.pages) * page };
         if (!boot.isMapped(range) or try range.endExclusive() > physical_limit) return error.InvalidTaskMemory;
+        if (boot.apps.reservation.length != 0 and range.base < try boot.apps.reservation.endExclusive() and
+            boot.apps.reservation.base < try range.endExclusive()) return error.AppArchiveCannotBackUserMemory;
         for (0..mapping.pages) |index| _ = try source(mapping.physical + index * page);
     }
     const owned: *Space = for (&spaces) |*candidate| {
         if (candidate.state == .free) break candidate;
     } else return error.AddressSpaceCapacity;
     owned.state = .building;
+    owned.shared = @splat(.{});
+    owned.shared_tables = @splat(@splat(0));
+    owned.table_limit = table_limit;
     errdefer {
         owned.tables.release() catch @panic("x86 address space rollback failed");
         owned.root = 0;
@@ -419,16 +442,16 @@ pub fn createWithTableLimit(task: contract.TaskMemory, table_limit: usize) !cont
         owned.state = .free;
     }
     var builder = try Builder.kernel(&owned.tables, table_limit);
-    for (task.mappings()) |mapping| {
+    for (task.allMappings()) |mapping| {
         for (0..mapping.pages) |index| {
             const physical = mapping.physical + index * page;
             const cache = (try source(physical)).cache;
-            if (!mapping.writable) try builder.mapPage(physical, physical, nx, cache);
-            try builder.mapPage(mapping.virtual + index * page, physical, user | (if (mapping.writable) writable | nx else 0), cache);
+            if (mapping.executable) try builder.mapPage(physical, physical, nx, cache);
+            try builder.mapPage(mapping.virtual + index * page, physical, user | (if (mapping.writable) writable else @as(u64, 0)) | (if (mapping.executable) @as(u64, 0) else nx), cache);
         }
     }
     try auditKernel(builder.root, .{ .base = task.code, .length = @as(u64, task.code_pages) * page });
-    try auditUser(builder.root, task);
+    try auditUser(builder.root, task, &owned.shared);
     asm volatile ("mfence" ::: .{ .memory = true });
     owned.root = builder.root;
     owned.task = task;
@@ -448,11 +471,133 @@ fn findSpace(space: contract.AddressSpace, allow_destroying: bool) !*Space {
     return error.StaleAddressSpace;
 }
 
+fn ledgerOwns(ledger: *const TableLedger, address: u64) bool {
+    for (ledger.addresses[0..ledger.count]) |owned| if (owned == address) return true;
+    return false;
+}
+fn sharedBacking(physical: u64, pages: u16) !void {
+    try contract.validateSharedBacking(boot, physical, pages);
+    const allocator = memory.allocator() orelse return error.MemoryNotInitialized;
+    try contract.validateSharedAllocation(allocator, physical, pages);
+    const bytes = @as(u64, pages) * page;
+    if (physical + bytes > physical_limit or
+        contract.physicalOverlap(physical, bytes, trap_guard, (contract.kernel_dispatch_stack_pages + 1) * page) or
+        contract.physicalOverlap(physical, bytes, emergency_guard, 3 * page)) return error.ProtectedSharedBacking;
+    for (kernel_tables.addresses[0..kernel_tables.count]) |address|
+        if (contract.physicalOverlap(physical, bytes, address, page)) return error.ProtectedSharedBacking;
+    for (&spaces) |*candidate| {
+        if (candidate.state == .free or candidate.state == .retired) continue;
+        for (candidate.tables.addresses[0..candidate.tables.count]) |address|
+            if (contract.physicalOverlap(physical, bytes, address, page)) return error.ProtectedSharedBacking;
+        if (candidate.state == .live or candidate.state == .destroying) for (candidate.task.allMappings()) |mapping|
+            if (contract.physicalOverlap(physical, bytes, mapping.physical, @as(u64, mapping.pages) * page)) return error.ProtectedSharedBacking;
+    }
+    for (0..pages) |index| {
+        const address = physical + index * page;
+        const alias = (try mapped(kernel_root, address)) orelse return error.InvalidSharedBacking;
+        if (alias.physical != address or alias.is_user or alias.execute or !alias.write or (alias.cache != 0 and alias.cache != 4))
+            return error.InvalidSharedPhysicalAlias;
+    }
+}
+fn sharedDirectory(owned: *const Space) !*[512]u64 {
+    const first = Builder.table(owned.root)[@intCast((contract.user_base >> 39) & 511)];
+    if (first & (present | user | ps) != present | user or !ledgerOwns(&owned.tables, first & address_mask)) return error.InvalidOwnedPageTable;
+    const second = Builder.table(first & address_mask)[@intCast((contract.user_base >> 30) & 511)];
+    if (second & (present | user | ps) != present | user or !ledgerOwns(&owned.tables, second & address_mask)) return error.InvalidOwnedPageTable;
+    return Builder.table(second & address_mask);
+}
+fn releaseSharedTable(owned: *Space, address: u64) !void {
+    const index = for (owned.tables.addresses[0..owned.tables.count], 0..) |value, at| {
+        if (value == address and at != 0) break at;
+    } else return error.InvalidOwnedPageTable;
+    try memory.allocator().?.release(address);
+    std.mem.copyForwards(u64, owned.tables.addresses[index .. owned.tables.count - 1], owned.tables.addresses[index + 1 .. owned.tables.count]);
+    owned.tables.count -= 1;
+    owned.tables.addresses[owned.tables.count] = 0;
+}
+
+/// Caller retains the broker-owned frame lease. No active root is changed.
+pub fn mapShared(space: contract.AddressSpace, slot: usize, physical: u64, pages: u16, writable_mapping: bool) !void {
+    try lifecycleReady();
+    const record = try contract.SharedMapping.init(slot, physical, pages, writable_mapping);
+    const mapping = try record.mapping(slot);
+    const owned = try findSpace(space, false);
+    if (owned.shared[slot].pages != 0) return error.SharedSlotOccupied;
+    try sharedBacking(physical, pages);
+    const directory = try sharedDirectory(owned);
+    const first: usize = @intCast((mapping.virtual >> 21) & 511);
+    const needed: usize = if (pages > 512) 2 else 1;
+    if (owned.tables.count + needed > owned.table_limit) return error.PageTableCapacity;
+    for (0..needed) |index| if (directory[first + index] != 0) return error.SharedWindowAlreadyMapped;
+    var allocated: [2]u64 = @splat(0);
+    var count: usize = 0;
+    var published = false;
+    errdefer {
+        if (published) {
+            for (0..needed) |index| directory[first + index] = 0;
+            owned.shared[slot] = .{};
+            owned.shared_tables[slot] = @splat(0);
+        }
+        bedrock_x86_flush_tlb();
+        for (allocated[0..count]) |address| {
+            if (published) {
+                releaseSharedTable(owned, address) catch @panic("x86 shared mapping rollback ledger");
+            } else {
+                memory.allocator().?.release(address) catch @panic("x86 unpublished shared table rollback");
+            }
+        }
+    }
+    for (0..needed) |index| {
+        allocated[index] = try Builder.allocateTable();
+        count += 1;
+    }
+    for (0..pages) |index| {
+        const address = physical + index * page;
+        Builder.table(allocated[index / 512])[index % 512] = address | present | user | nx |
+            (if (writable_mapping) writable else @as(u64, 0)) | cacheFlags((try source(address)).cache, false);
+    }
+    for (allocated[0..needed], 0..) |address, index| {
+        owned.tables.addresses[owned.tables.count] = address;
+        owned.tables.count += 1;
+        directory[first + index] = address | present | writable | user;
+    }
+    owned.shared[slot] = record;
+    owned.shared_tables[slot] = allocated;
+    published = true;
+    asm volatile ("mfence" ::: .{ .memory = true });
+    try auditUser(owned.root, owned.task, &owned.shared);
+    try auditKernel(owned.root, .{ .base = owned.task.code, .length = @as(u64, owned.task.code_pages) * page });
+    bedrock_x86_flush_tlb();
+}
+
+pub fn unmapShared(space: contract.AddressSpace, slot: usize) !void {
+    try lifecycleReady();
+    if (slot >= contract.shared_surface_slots) return error.InvalidSharedMapping;
+    const owned = try findSpace(space, false);
+    const record = owned.shared[slot];
+    if (record.pages == 0) return error.SharedSlotEmpty;
+    const mapping = try record.mapping(slot);
+    const directory = try sharedDirectory(owned);
+    const first: usize = @intCast((mapping.virtual >> 21) & 511);
+    const allocated = owned.shared_tables[slot];
+    const needed: usize = if (record.pages > 512) 2 else 1;
+    try auditUser(owned.root, owned.task, &owned.shared);
+    for (allocated[0..needed], 0..) |address, index|
+        if (!ledgerOwns(&owned.tables, address) or !page_table_entry.matchesSharedTable(directory[first + index], address)) return error.InvalidOwnedPageTable;
+    for (0..needed) |index| directory[first + index] = 0;
+    owned.shared[slot] = .{};
+    owned.shared_tables[slot] = @splat(0);
+    bedrock_x86_flush_tlb();
+    for (allocated[0..needed]) |address| try releaseSharedTable(owned, address);
+    try auditUser(owned.root, owned.task, &owned.shared);
+}
+
 /// Release this space's independently owned table frames. Task payload pages,
 /// permanent kernel tables, and kernel trap stacks belong to other owners.
 pub fn destroy(space: contract.AddressSpace) !void {
     try lifecycleReady();
     const owned = try findSpace(space, true);
+    for (owned.shared) |record| if (record.pages != 0) return error.AddressSpaceHasSharedMappings;
     for (&contexts) |*context| {
         if (context.occupied and context.space.root == space.root and context.space.generation == space.generation)
             return error.AddressSpaceHasContexts;
@@ -476,7 +621,7 @@ pub fn programBytes() []const u8 {
 pub fn run(space: contract.AddressSpace, invocation: contract.Invocation) void {
     lifecycleReady() catch @panic("invalid x86 address space entry state");
     const owned = findSpace(space, false) catch @panic("stale x86 address space entry");
-    std.debug.assert(!owned.task.desktop and invocation.entry == user_base and invocation.user_sp > contract.user_stack and invocation.user_sp <= contract.user_stack_top);
+    std.debug.assert(!owned.task.desktop and !owned.task.app and invocation.entry == user_base and invocation.user_sp > contract.user_stack and invocation.user_sp <= contract.user_stack_top);
     running_task = owned.task;
     running = true;
     bedrock_x86_enter(space.root, &invocation);
@@ -526,7 +671,7 @@ pub fn createContext(space: contract.AddressSpace, invocation: contract.Invocati
     // Do not accept an unaudited root merely because its physical address is
     // accessible. Check supervisor aliases and the three actual user leaves.
     try auditKernel(space.root, .{ .base = owned.task.code, .length = @as(u64, owned.task.code_pages) * page });
-    try auditUser(space.root, owned.task);
+    try auditUser(space.root, owned.task, &owned.shared);
     const context = &contexts[index];
     context.space = space;
     context.frame = .{

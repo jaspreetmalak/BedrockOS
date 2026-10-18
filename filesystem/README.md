@@ -138,7 +138,12 @@ read/write interface; Bedrock does not claim device purge or certified media
 sanitization. See [NIST SP 800-88 Rev. 2](https://csrc.nist.gov/pubs/sp/800/88/r2/final).
 
 The kernel's storage runtime mounts this backend once per boot on the dedicated
-`bedrock-data` device. Stable launcher IDs keep acceptance workload 1 separate
+raw `bedrock-data` device or a validated GPT Bedrock data partition. The latter
+uses a retained bounded `partition.View`; filesystem requests cannot reach the
+ESP, GPT metadata or neighboring partitions. Primary and backup GPT tables must
+agree, and ambiguous data candidates fail. Mount never formats. See the
+[native installer](../docs/installer.md) for the partition layout.
+Stable launcher IDs keep acceptance workload 1 separate
 from native Files 2 across reboot. Files uses checked VFS directory/file
 requests; its protected client never receives the block device or raw image.
 

@@ -10,7 +10,8 @@ probes.
 NetworkKit also exposes a separate native Wi-Fi control API. Its bounded
 controller, entitled syscall adapter and simulated/unavailable-radio acceptance
 are described in the [Wi-Fi foundation](wifi-framework.md). That API does not
-provide a physical radio or connect this Ethernet data path to Wi-Fi.
+provide a physical radio. The later [native station/boot integration](wifi-boot-setup.md)
+adds protected station control and optional explicit static IPv4 attachment.
 
 ## Public API
 

@@ -138,7 +138,7 @@ fn identityMapped(base: u64, bytes: u64, bits: u32) bool {
     }
     return true;
 }
-fn validatePlatform(info: protocol.BootInfo) void {
+fn validatePlatform(info: *const protocol.BootInfo) void {
     if (info.entry_state != @backingInt(protocol.EntryState.x86_64_long_mode)) fail("unexpected CPU entry state");
     if (info.memory_region_count == 0) fail("missing discovered memory map");
     if (info.boot_environment == @backingInt(protocol.BootEnvironment.reset_firmware)) {
@@ -185,13 +185,14 @@ export fn bedrock_kernel_main(raw_info: usize, available_bytes: usize) callconv(
     if (available_bytes < @sizeOf(protocol.BootInfo) or header.header_size < @sizeOf(protocol.BootInfo))
         fail("truncated handoff record");
     if (!identityMapped(raw_info, @sizeOf(protocol.BootInfo), physical_bits)) fail("handoff record is not mapped");
-    const info = @as(*const protocol.BootInfo, @ptrFromInt(raw_info)).*;
+    // Retain one validated handoff owner instead of making secret seed copies.
+    const info: *const protocol.BootInfo = @ptrFromInt(raw_info);
     info.validate(available_bytes, .x86_64) catch fail("invalid handoff record");
     const loader_end = info.loader_reserved.endExclusive() catch fail("loader reservation overflow");
     if (raw_info < info.loader_reserved.base or raw_info >= loader_end or available_bytes > loader_end - raw_info)
         fail("handoff crosses loader reservation");
     validatePlatform(info);
-    if (!uart.configure(&info)) fail("unsupported console description");
+    if (!uart.configure(info)) fail("unsupported console description");
     uart.write("[kernel] x86_64 entry\n");
     smoke_exit = info.flags & protocol.flag_smoke_exit != 0;
     uart.write("[kernel] handoff valid\n");
@@ -202,7 +203,7 @@ export fn bedrock_kernel_main(raw_info: usize, available_bytes: usize) callconv(
     uart.write(" reserved through=");
     uart.hex(info.kernel_reserved.base + info.kernel_reserved.length);
     uart.write("\n");
-    memory.initialize(uart, &info) catch |err| {
+    memory.initialize(uart, info) catch |err| {
         uart.write("[fault] kernel memory initialization: ");
         uart.write(@errorName(err));
         uart.write("\n");
@@ -213,7 +214,7 @@ export fn bedrock_kernel_main(raw_info: usize, available_bytes: usize) callconv(
     if (breakState().* != 2 or !state_preserved) fail("exception state was not preserved");
     breakState().* = 0;
     if (options.uefi_entry) {
-        @import("isolation").run(uart, &info) catch |err| {
+        @import("isolation").run(uart, info) catch |err| {
             uart.write("[fault] kernel isolation: ");
             uart.write(@errorName(err));
             uart.write("\n");
@@ -223,7 +224,7 @@ export fn bedrock_kernel_main(raw_info: usize, available_bytes: usize) callconv(
     uart.write("[kernel] x86_64 boot complete\n");
     if (options.uefi_entry and !smoke_exit and info.console.kind == @backingInt(protocol.ConsoleKind.framebuffer)) {
         uart.desktopTrace();
-        @import("isolation").runDesktop(uart, &info, "x86_64") catch |err| {
+        @import("isolation").runDesktop(uart, info, "x86_64") catch |err| {
             @import("framebuffer").configure(info.framebuffer);
             fail(@errorName(err));
         };

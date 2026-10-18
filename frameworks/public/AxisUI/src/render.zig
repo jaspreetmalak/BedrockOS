@@ -2,6 +2,7 @@ const types = @import("types.zig");
 const Surface = @import("surface.zig").Surface;
 const Error = @import("surface.zig").Error;
 const font = @import("font.zig");
+const materials = @import("materials.zig");
 
 pub const max_depth = 32;
 pub const max_nodes = 1024;
@@ -30,6 +31,7 @@ const Plan = struct {
     nodes: [max_nodes]Node,
     path: [max_depth]*const types.View,
     count: u16,
+    legacy_text: bool,
 
     fn visit(self: *Plan, view: *const types.View, depth: usize, foreground: types.Color, scale: u8) Error!u16 {
         if (view.style.background_material != null and view.style.background_color != null) return error.InvalidMaterial;
@@ -55,7 +57,7 @@ const Plan = struct {
         const end = self.count;
         var content: Size = .{};
         switch (view.kind) {
-            .text => |bytes| content = try textSize(bytes, actual_scale),
+            .text => |bytes| content = try textSize(bytes, actual_scale, self.legacy_text),
             .spacer => {},
             .hstack, .vstack, .zstack => {
                 var child = index + 1;
@@ -105,8 +107,8 @@ const Plan = struct {
     }
 };
 
-fn textSize(bytes: []const u8, scale: u8) Error!Size {
-    const measured = try font.measure(bytes, scale);
+fn textSize(bytes: []const u8, scale: u8, legacy: bool) Error!Size {
+    const measured = if (legacy) try font.measureLegacy(bytes, scale) else try font.measure(bytes, scale);
     return .{ .width = measured.width, .height = measured.height };
 }
 
@@ -144,6 +146,12 @@ const Rect = struct {
 const Shape = struct {
     rectangle: Rect,
     radius: u32,
+    smooth: bool = false,
+
+    fn coverage(self: Shape, x: i64, y: i64) u8 {
+        if (!self.smooth) return if (self.contains(x, y)) 255 else 0;
+        return materials.roundedCoverage(self.rectangle.width, self.rectangle.height, self.radius, x - self.rectangle.x, y - self.rectangle.y);
+    }
 
     fn contains(self: Shape, x: i64, y: i64) bool {
         const rectangle = self.rectangle;
@@ -173,16 +181,103 @@ const Painter = struct {
     plan: *const Plan,
     shapes: *[max_depth]Shape,
 
+    fn hasSmooth(self: *const Painter, depth: usize) bool {
+        for (self.shapes[0 .. depth + 1]) |shape| if (shape.smooth and shape.radius != 0) return true;
+        return false;
+    }
+
+    fn coverage(self: *const Painter, x: i64, y: i64, depth: usize) u8 {
+        var alpha: u8 = 255;
+        for (self.shapes[0 .. depth + 1]) |shape| {
+            alpha = @min(alpha, shape.coverage(x, y));
+            if (alpha == 0) return 0;
+        }
+        return alpha;
+    }
+
     fn pixel(self: *Painter, x: i64, y: i64, value: u32, depth: usize) void {
         // Every caller intersects with the checked surface before reaching here.
-        for (self.shapes[0 .. depth + 1]) |shape| if (!shape.contains(x, y)) return;
-        self.surface.putPixel(@intCast(x), @intCast(y), value);
+        const alpha = self.coverage(x, y, depth);
+        if (alpha == 255) self.surface.putPixel(@intCast(x), @intCast(y), value) else if (alpha != 0)
+            self.surface.blendPixel(@intCast(x), @intCast(y), self.surface.decode(value), alpha);
+    }
+
+    /// Convex outlines cover a complete rectangle when all corner pixels have
+    /// full coverage. This avoids testing ancestors at each interior pixel.
+    fn fullyCovered(self: *const Painter, rectangle: Rect, depth: usize) bool {
+        if (rectangle.width == 0 or rectangle.height == 0) return false;
+        const right = rectangle.x + rectangle.width - 1;
+        const bottom = rectangle.y + rectangle.height - 1;
+        for (self.shapes[0 .. depth + 1]) |shape| {
+            if (shape.coverage(rectangle.x, rectangle.y) != 255 or shape.coverage(right, rectangle.y) != 255 or
+                shape.coverage(rectangle.x, bottom) != 255 or shape.coverage(right, bottom) != 255) return false;
+        }
+        return true;
+    }
+
+    const Span = struct { left: i64, right: i64 };
+    fn opaqueSpan(self: *const Painter, visible: Rect, row: i64, depth: usize) Span {
+        var span: Span = .{ .left = visible.x, .right = visible.x + visible.width };
+        for (self.shapes[0 .. depth + 1]) |shape| {
+            const rectangle = shape.rectangle;
+            const local_y = row - rectangle.y;
+            if (local_y < 0 or local_y >= rectangle.height) return .{ .left = span.left, .right = span.left };
+            const radius = @min(shape.radius, @min(rectangle.width, rectangle.height) / 2);
+            const margin = if (local_y >= radius and local_y < rectangle.height - radius) 0 else radius;
+            span.left = @max(span.left, rectangle.x + margin);
+            span.right = @min(span.right, rectangle.x + rectangle.width - margin);
+            if (span.right <= span.left) return .{ .left = visible.x, .right = visible.x };
+        }
+        return span;
+    }
+
+    fn bulk(self: *Painter, rectangle: Rect, color: types.Color, material_value: ?types.Material) void {
+        if (rectangle.width == 0 or rectangle.height == 0) return;
+        if (material_value) |value| self.surface.materialRect(@intCast(rectangle.x), @intCast(rectangle.y), rectangle.width, rectangle.height, value) else self.surface.fillRect(@intCast(rectangle.x), @intCast(rectangle.y), rectangle.width, rectangle.height, self.surface.encode(color));
+    }
+
+    fn smoothSpan(self: *Painter, row: i64, left: i64, right: i64, color: types.Color, material_value: ?types.Material, depth: usize) void {
+        const pixel_value = self.surface.encode(color);
+        var start: ?i64 = null;
+        var column = left;
+        while (column <= right) : (column += 1) {
+            const alpha = if (column < right) self.coverage(column, row, depth) else 0;
+            if (alpha == 255) {
+                if (start == null) start = column;
+            } else {
+                if (start) |first| {
+                    if (material_value) |value| self.surface.materialRect(@intCast(first), @intCast(row), @intCast(column - first), 1, value) else self.surface.fillRect(@intCast(first), @intCast(row), @intCast(column - first), 1, pixel_value);
+                }
+                start = null;
+                if (alpha != 0) {
+                    if (material_value) |value| self.surface.materialPixel(@intCast(column), @intCast(row), value, alpha) else self.surface.blendPixel(@intCast(column), @intCast(row), color, alpha);
+                }
+            }
+        }
+    }
+
+    fn smoothFill(self: *Painter, visible: Rect, color: types.Color, material_value: ?types.Material, depth: usize) void {
+        var row = visible.y;
+        while (row < visible.y + visible.height) : (row += 1) {
+            const span = self.opaqueSpan(visible, row, depth);
+            self.smoothSpan(row, visible.x, span.left, color, material_value, depth);
+            self.bulk(.{ .x = span.left, .y = row, .width = @intCast(span.right - span.left), .height = 1 }, color, material_value);
+            self.smoothSpan(row, span.right, visible.x + visible.width, color, material_value, depth);
+        }
     }
 
     fn fill(self: *Painter, area: Rect, clip: Rect, color: types.Color, depth: usize) void {
         const visible = area.intersect(clip);
         const value = self.surface.encode(color);
         if (visible.width == 0 or visible.height == 0) return;
+        if (self.fullyCovered(visible, depth)) {
+            self.bulk(visible, color, null);
+            return;
+        }
+        if (self.hasSmooth(depth)) {
+            self.smoothFill(visible, color, null, depth);
+            return;
+        }
         if (self.surface.commands != null) {
             // Rounded rectangles and their intersections are convex. Four
             // contained corners prove this entire rectangular fill is inside.
@@ -233,6 +328,14 @@ const Painter = struct {
     fn material(self: *Painter, area: Rect, clip: Rect, value: types.Material, depth: usize) void {
         const visible = area.intersect(clip);
         if (visible.width == 0 or visible.height == 0) return;
+        if (self.fullyCovered(visible, depth)) {
+            self.bulk(visible, value.tint, value);
+            return;
+        }
+        if (self.hasSmooth(depth)) {
+            self.smoothFill(visible, value.tint, value, depth);
+            return;
+        }
         var all_inside = true;
         for (self.shapes[0 .. depth + 1]) |shape| {
             const right = visible.x + visible.width - 1;
@@ -272,8 +375,33 @@ const Painter = struct {
 
     fn border(self: *Painter, rectangle: Rect, clip: Rect, color: types.Color, width: u32, radius: u32, depth: usize) void {
         const visible = rectangle.intersect(clip);
-        const inner: Shape = .{ .rectangle = rectangle.inset(width), .radius = radius - @min(radius, width) };
+        const inner: Shape = .{ .rectangle = rectangle.inset(width), .radius = radius - @min(radius, width), .smooth = self.shapes[depth].smooth };
         const value = self.surface.encode(color);
+        if (self.hasSmooth(depth)) {
+            var y = visible.y;
+            while (y < visible.y + visible.height) : (y += 1) {
+                const local_inner_y = y - inner.rectangle.y;
+                const inner_radius = @min(inner.radius, @min(inner.rectangle.width, inner.rectangle.height) / 2);
+                var skip_start = visible.x + visible.width;
+                var skip_end = skip_start;
+                if (inner.rectangle.width != 0 and local_inner_y >= 0 and local_inner_y < inner.rectangle.height) {
+                    const margin = if (local_inner_y >= inner_radius and local_inner_y < inner.rectangle.height - inner_radius) 0 else inner_radius;
+                    skip_start = @min(visible.x + visible.width, @max(visible.x, inner.rectangle.x + margin));
+                    skip_end = @min(visible.x + visible.width, @max(visible.x, inner.rectangle.x + inner.rectangle.width - margin));
+                }
+                var x = visible.x;
+                while (x < visible.x + visible.width) {
+                    if (x == skip_start and skip_end > skip_start) {
+                        x = skip_end;
+                        continue;
+                    }
+                    const alpha = @min(self.coverage(x, y, depth), self.shapes[depth].coverage(x, y) -| inner.coverage(x, y));
+                    self.surface.blendPixel(@intCast(x), @intCast(y), color, alpha);
+                    x += 1;
+                }
+            }
+            return;
+        }
         if (self.surface.commands != null) {
             var row = visible.y;
             while (row < visible.y + visible.height) : (row += 1) {
@@ -307,10 +435,14 @@ const Painter = struct {
     }
 
     fn text(self: *Painter, bytes: []const u8, area: Rect, clip: Rect, color: types.Color, scale: u8, depth: usize) void {
+        if (self.surface.legacy_text) {
+            self.legacyText(bytes, area, clip, color, scale, depth);
+            return;
+        }
         const visible = area.intersect(clip);
+        const unclipped = self.fullyCovered(visible, depth);
         var x = area.x;
         var y = area.y;
-        const cell_width: u32 = font.advance * scale;
         const cell_height: u32 = font.line_height * scale;
         for (bytes) |byte| {
             if (byte == '\r') continue;
@@ -320,22 +452,51 @@ const Painter = struct {
                 continue;
             }
             if (byte == '\t') {
-                x += cell_width * 4;
+                x += font.glyphAdvance(byte) * scale;
                 continue;
             }
-            const glyph = font.glyph(byte);
-            for (glyph, 0..) |bits, dy| {
-                for (0..font.glyph_width) |dx| {
-                    if (bits & (@as(u8, 1) << @as(u3, @intCast(4 - dx))) == 0) continue;
-                    self.fill(.{
-                        .x = x + (@as(i64, @intCast(dx)) + font.offset_x) * scale,
-                        .y = y + (@as(i64, @intCast(dy)) + font.offset_y) * scale,
-                        .width = scale,
-                        .height = scale,
-                    }, visible, color, depth);
+            const width = font.glyphAdvance(byte) * scale;
+            for (0..font.coverage_height * scale) |row| {
+                const py = y + @as(i64, @intCast(row));
+                if (py < visible.y or py >= visible.y + visible.height) continue;
+                for (0..width) |column| {
+                    const px = x + @as(i64, @intCast(column));
+                    if (px < visible.x or px >= visible.x + visible.width) continue;
+                    const alpha = font.coverage(byte, @intCast(column), @intCast(row), scale);
+                    if (alpha == 0) continue;
+                    const clipped_alpha: u8 = if (unclipped) alpha else @intCast((@as(u32, alpha) * self.coverage(px, py, depth) + 127) / 255);
+                    self.surface.blendPixel(@intCast(px), @intCast(py), color, clipped_alpha);
                 }
             }
-            x += cell_width;
+            x += width;
+        }
+    }
+
+    fn legacyText(self: *Painter, bytes: []const u8, area: Rect, clip: Rect, color: types.Color, scale: u8, depth: usize) void {
+        const visible = area.intersect(clip);
+        var x = area.x;
+        var y = area.y;
+        for (bytes) |byte| {
+            if (byte == '\r') continue;
+            if (byte == '\n') {
+                x = area.x;
+                y += font.legacy_line_height * scale;
+                continue;
+            }
+            if (byte == '\t') {
+                x += font.legacy_advance * scale * 4;
+                continue;
+            }
+            for (font.glyph(byte), 0..) |bits, row| for (0..font.glyph_width) |column| {
+                if (bits & (@as(u8, 1) << @as(u3, @intCast(4 - column))) == 0) continue;
+                self.fill(.{
+                    .x = x + (@as(i64, @intCast(column)) + font.offset_x) * scale,
+                    .y = y + (@as(i64, @intCast(row)) + font.offset_y) * scale,
+                    .width = scale,
+                    .height = scale,
+                }, visible, color, depth);
+            };
+            x += font.legacy_advance * scale;
         }
     }
 
@@ -348,7 +509,7 @@ const Painter = struct {
         const clip = rectangle.intersect(inherited_clip);
         if (clip.width == 0 or clip.height == 0) return;
         const radius = @min(@as(u32, view.style.radius), @min(rectangle.width, rectangle.height) / 2);
-        self.shapes[depth] = .{ .rectangle = rectangle, .radius = radius };
+        self.shapes[depth] = .{ .rectangle = rectangle, .radius = radius, .smooth = view.style.smooth_corners };
         if (view.style.background_color) |color| self.fill(rectangle, clip, color, depth);
         if (view.style.background_material) |value| self.material(rectangle, clip, value, depth);
         const content = rectangle.inset(view.style.inset);
@@ -356,13 +517,29 @@ const Painter = struct {
         switch (view.kind) {
             .text => |bytes| {
                 // Preflight already checked these borrowed, immutable bytes.
-                const size = textSize(bytes, node.scale) catch unreachable;
+                const size = textSize(bytes, node.scale, self.surface.legacy_text) catch unreachable;
+                const vertical = view.style.text_vertical_alignment orelse view.style.alignment;
+                var text_y: i64 = content.y + offset(content.height, size.height, vertical);
+                var text_clip = content_clip;
+                if (!self.surface.legacy_text and vertical == .center and size.height != 0) {
+                    // Center the shared cap-height band, rather than the empty
+                    // descent padding in a line box. Multiline labels retain
+                    // their line advance and center the complete text block.
+                    const extra_lines = size.height - font.line_height * node.scale;
+                    text_y = content.y + (font.controlOriginY(0, content.height, node.scale) catch unreachable) - extra_lines / 2;
+                    // Ink can extend below the cap band into a text leaf's own
+                    // padding. Its outer frame, rounded shape and every
+                    // ancestor's clip still bound coverage; horizontal padding
+                    // continues to reserve space around the label.
+                    text_clip.y = clip.y;
+                    text_clip.height = clip.height;
+                }
                 self.text(bytes, .{
                     .x = content.x + offset(content.width, size.width, view.style.alignment),
-                    .y = content.y + offset(content.height, size.height, view.style.alignment),
+                    .y = text_y,
                     .width = size.width,
                     .height = size.height,
-                }, content_clip, node.foreground, node.scale, depth);
+                }, text_clip, node.foreground, node.scale, depth);
             },
             .spacer => {},
             .zstack => {
@@ -450,6 +627,7 @@ pub const Workspace = struct {
 pub fn renderWithWorkspace(surface: *Surface, workspace: *Workspace, view: types.View) Error!void {
     try surface.validate();
     workspace.plan.count = 0;
+    workspace.plan.legacy_text = surface.legacy_text;
     _ = try workspace.plan.visit(&view, 0, types.Color.rgb(255, 255, 255), 1);
     var painter: Painter = .{ .surface = surface, .plan = &workspace.plan, .shapes = &workspace.shapes };
     const bounds: Rect = .{ .x = 0, .y = 0, .width = surface.width, .height = surface.height };

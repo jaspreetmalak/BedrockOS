@@ -211,7 +211,7 @@ class RegulatoryImporterTests(unittest.TestCase):
                     regdb.ordinary_path(type(ROOT)(name), output=True)
 
     def test_generated_golden_hash_counts_license_and_metadata(self):
-        directory = ROOT / "kernel/src/drivers/wifi/regulatory"
+        directory = ROOT / "drivers/wifi/src/regulatory"
         generated = (directory / "database.zig").read_bytes()
         metadata = json.loads((directory / "provenance.json").read_text(encoding="utf-8"))
         self.assertEqual(hashlib.sha256(generated).hexdigest(), GENERATED_SHA256)
@@ -232,7 +232,7 @@ class RegulatoryImporterTests(unittest.TestCase):
         self.assertEqual((len(database.countries), database.rule_count), (182, 1016))
         generated = regdb.render(database, regdb.SOURCE_SHA256)
         self.assertEqual(hashlib.sha256(generated).hexdigest(), GENERATED_SHA256)
-        self.assertEqual(generated, (ROOT / "kernel/src/drivers/wifi/regulatory/database.zig").read_bytes())
+        self.assertEqual(generated, (ROOT / "drivers/wifi/src/regulatory/database.zig").read_bytes())
         countries = {country.alpha2: country for country in database.countries}
         us, gb, jp, world = [countries[code] for code in ("US", "GB", "JP", "00")]
         self.assertEqual([country.dfs_region for country in (us, gb, jp, world)], ["fcc", "etsi", "jp", "unset"])

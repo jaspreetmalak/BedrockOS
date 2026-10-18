@@ -1,8 +1,0 @@
-.{
-    .name = .bedrock_ieee80211,
-    .fingerprint = 0x9ba215bc4ea06b60,
-    .version = "0.1.0",
-    .minimum_zig_version = "0.17.0",
-    .dependencies = .{ .networkkit = .{ .path = "../../../../../frameworks/public/NetworkKit" } },
-    .paths = .{ "build.zig", "build.zig.zon", "root.zig", "management.zig", "rsn.zig", "wpa2.zig", "eapol.zig", "keywrap.zig", "handshake.zig", "station.zig", "tests.zig", "handshake_tests.zig", "compile_check.zig", "README.md", "THIRD_PARTY.md" },
-}

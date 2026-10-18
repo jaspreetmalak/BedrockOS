@@ -31,10 +31,10 @@ SECTIONS
     .bss (NOLOAD) : ALIGN(16) { __bss_start = .; *(.bss .bss.*) *(.sbss .sbss.*) *(COMMON) . = ALIGN(16); __bss_end = .; } :data
     . = ALIGN(4096);
     __data_end = .;
-    .stack 0x1f0000 (NOLOAD) : {
+    .stack 0x3e0000 (NOLOAD) : {
         __stack_bottom = .;
         __stack_guard = . - 0x1000;
-        . += 0x10000;
+        . += 0x20000;
     } :data
     __stack_top = .;
     __kernel_allocated_end = .;
@@ -42,4 +42,4 @@ SECTIONS
 }
 ASSERT(_start == 0, "PIE kernel entry must be first")
 ASSERT(__data_end <= __stack_guard, "PIE kernel overlaps its stack guard")
-ASSERT(__stack_top == 0x200000, "PIE kernel allocation must be 2 MiB")
+ASSERT(__stack_top == 0x400000, "PIE kernel allocation must be 4 MiB")

@@ -11,7 +11,7 @@
 /// its nonzero generation. Application input is untrusted, including this type.
 pub const Token = enum(u64) { _ };
 
-pub const ObjectKind = enum { file, directory, socket, ipc };
+pub const ObjectKind = enum { file, directory, socket, ipc, surface, service };
 pub const Rights = u64;
 
 pub const rights = struct {
@@ -51,6 +51,8 @@ pub fn allowedRights(kind: ObjectKind) Rights {
         .directory => rights.enumerate | rights.create | rights.remove,
         .socket => rights.connect | rights.accept | rights.send | rights.receive,
         .ipc => rights.send | rights.receive,
+        .surface => rights.read | rights.write | rights.send,
+        .service => rights.send | rights.receive,
     };
 }
 

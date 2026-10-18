@@ -1,0 +1,8 @@
+{
+  "format": "bedrock-apps-v1",
+  "apps": [
+    { "id": 101, "name": "org.bedrock.init", "version": 1, "entry": "/bundle/main.elf" },
+    { "id": 102, "name": "org.bedrock.observer", "version": 1, "entry": "/bundle/main.elf" },
+    { "id": 103, "name": "org.bedrock.worker", "version": 1, "entry": "/bundle/main.elf" }
+  ]
+}

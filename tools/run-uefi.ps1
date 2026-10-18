@@ -25,8 +25,8 @@ if ([string]::IsNullOrWhiteSpace($DataImage)) {
 }
 # Reuse existing media without formatting. Reject device namespaces, non-files
 # and symlinks before any writable QEMU attachment.
-$bedrockValidateImage = 'import runpy,sys; from pathlib import Path; runpy.run_path(sys.argv[1])["validate_output"](Path(sys.argv[2]))'
-& $bedrockPython -c $bedrockValidateImage $bedrockImageTool $DataImage
+$bedrockValidateImage = 'import runpy,sys; from pathlib import Path; runpy.run_path(sys.argv[1])[sys.argv[3]](Path(sys.argv[2]))'
+& $bedrockPython -c $bedrockValidateImage $bedrockImageTool $DataImage validate_output
 if ($LASTEXITCODE -ne 0) { throw 'The data image must be an ordinary file in an existing directory.' }
 if (-not (Test-Path -LiteralPath $DataImage -PathType Leaf)) {
     & $bedrockPython $bedrockImageTool $DataImage

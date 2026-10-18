@@ -51,10 +51,13 @@ pub const Ecam = struct {
         if (info.mapped_range_count == 0 or info.mapped_range_count > protocol.max_mapped_ranges) return error.InvalidMappedRangeCount;
         if (info.loader_reserved.length == 0 or info.kernel_reserved.length == 0) return error.InvalidReservedRange;
         if ((info.framebuffer.base == 0) != (info.framebuffer.size == 0)) return error.InvalidFramebufferRange;
-        for ([_]protocol.PhysicalRange{ info.loader_reserved, info.kernel_reserved, .{ .base = info.framebuffer.base, .length = info.framebuffer.size } }) |protected| {
+        for ([_]protocol.PhysicalRange{ info.loader_reserved, info.kernel_reserved, info.wifi.reservation, info.apps.reservation, .{ .base = info.framebuffer.base, .length = info.framebuffer.size } }) |protected| {
             const protected_end = try protected.endExclusive();
             if (protected.length != 0 and base < protected_end and protected.base < aperture_end) return error.ProtectedMemoryAlias;
         }
+        if (info.drivers.count > protocol.max_boot_drivers) return error.InvalidDriverRecord;
+        for (info.drivers.records[0..info.drivers.count]) |driver|
+            if (base < try driver.reservation.endExclusive() and driver.reservation.base < aperture_end) return error.ProtectedMemoryAlias;
         var prior_end: u64 = 0;
         for (info.memory_regions[0..info.memory_region_count], 0..) |region, i| {
             const region_end = try region.range.endExclusive();
@@ -91,6 +94,9 @@ pub const Ecam = struct {
 
 fn apertureFixture() protocol.BootInfo {
     var info: protocol.BootInfo = undefined;
+    info.wifi = .{};
+    info.drivers = .{};
+    info.apps = .{};
     info.loader_reserved = .{ .base = 0x100000, .length = 0x100000 };
     info.kernel_reserved = .{ .base = 0x200000, .length = 0x100000 };
     info.framebuffer = .{ .base = 0x300000, .size = 0x10000 };
@@ -138,5 +144,15 @@ test "ECAM rejects malformed aperture and overflowing protected extents before p
     try std.testing.expectError(error.InvalidEcam, Ecam.init(&info, 0x800000, 0, 0, 0, 0));
     try std.testing.expectError(error.PhysicalRangeOverflow, Ecam.init(&info, 0xfffffffffff00000, 1 << 20, 0, 0, 0));
     info.kernel_reserved = .{ .base = 0xfffffffffffff000, .length = 0x2000 };
+    try std.testing.expectError(error.PhysicalRangeOverflow, Ecam.init(&info, 0x800000, 1 << 20, 0, 0, 0));
+}
+
+test "ECAM cannot alias an interior application archive reservation or overflow its bounds" {
+    var info = apertureFixture();
+    info.apps.reservation = .{ .base = 0x880000, .length = 0x1000 };
+    try std.testing.expectError(error.ProtectedMemoryAlias, Ecam.init(&info, 0x800000, 1 << 20, 0, 0, 0));
+    info.apps.reservation = .{ .base = 0x900000, .length = 0x1000 };
+    _ = try Ecam.init(&info, 0x800000, 1 << 20, 0, 0, 0);
+    info.apps.reservation = .{ .base = 0xfffffffffffff000, .length = 0x2000 };
     try std.testing.expectError(error.PhysicalRangeOverflow, Ecam.init(&info, 0x800000, 1 << 20, 0, 0, 0));
 }

@@ -1,0 +1,33 @@
+{
+  "capture_kind": "native QEMU screenshot",
+  "architecture": "x86_64",
+  "images": [
+    {
+      "file": "desktop.png",
+      "source": "zig-out/system-menu-tests/debug/x86_64/system-menus-x86_64-tabs-torn-off.png",
+      "receipt": "zig-out/system-menu-tests/debug/x86_64/system-menus-x86_64-verification.json",
+      "scene": "tabs-torn-off",
+      "sha256": "b37aae721ba1e52bc91782fc47588594e09cd44592e5ad3db777cb948fc71c95",
+      "width": 1280,
+      "height": 800
+    },
+    {
+      "file": "control-center.png",
+      "source": "zig-out/system-menu-tests/debug/x86_64/system-menus-x86_64-control-center.png",
+      "receipt": "zig-out/system-menu-tests/debug/x86_64/system-menus-x86_64-verification.json",
+      "scene": "control-center",
+      "sha256": "e35a242a938a894e6bef4a60ffd7e3bdcda9024227c533fdc33416ef278ba6e7",
+      "width": 1280,
+      "height": 800
+    },
+    {
+      "file": "installer.png",
+      "source": "zig-out/installer-tests/debug/x86_64/installer-x86_64-install-partition-review.png",
+      "receipt": "zig-out/installer-tests/debug/x86_64/installer-x86_64-verification.json",
+      "scene": "partition-review",
+      "sha256": "4081cbef5395bf1cf7c03ffd305084cef9da654081ef17631e7b720f3fbaaf9a",
+      "width": 1280,
+      "height": 800
+    }
+  ]
+}

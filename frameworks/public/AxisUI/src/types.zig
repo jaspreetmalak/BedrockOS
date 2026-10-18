@@ -30,9 +30,16 @@ pub const Style = struct {
     border_color: ?Color = null,
     border_width: u8 = 0,
     radius: u16 = 0,
+    /// Opt-in grayscale corner coverage; historical diagnostic outlines remain
+    /// binary unless requested. Descendants inherit the geometric clip.
+    smooth_corners: bool = false,
     font_scale: ?u8 = null,
     flex_weight: u16 = 0,
     alignment: Align = .stretch,
+    /// Optional independent vertical alignment for text leaves. Horizontal
+    /// placement continues to use alignment, so right-aligned values can share
+    /// a centered baseline with left-aligned labels in the same control row.
+    text_vertical_alignment: ?Align = null,
 };
 
 pub const View = struct {
@@ -89,6 +96,11 @@ pub const View = struct {
         result.style.radius = radius;
         return result;
     }
+    pub fn smoothCorners(self: View) View {
+        var result = self;
+        result.style.smooth_corners = true;
+        return result;
+    }
     pub fn scale(self: View, value: u8) View {
         var result = self;
         result.style.font_scale = value;
@@ -102,6 +114,11 @@ pub const View = struct {
     pub fn @"align"(self: View, alignment: Align) View {
         var result = self;
         result.style.alignment = alignment;
+        return result;
+    }
+    pub fn textVerticalAlign(self: View, alignment: Align) View {
+        var result = self;
+        result.style.text_vertical_alignment = alignment;
         return result;
     }
 };

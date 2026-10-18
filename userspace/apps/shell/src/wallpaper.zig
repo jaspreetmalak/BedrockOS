@@ -1,61 +1,60 @@
-//! Original procedural wallpaper: integer row spans, no assets or allocation.
+//! Original continuous light fields: bounded integer spans, no assets or heap.
 const ui = @import("axisui");
 const Color = ui.Color;
-pub const charcoal = Color.rgb(35, 37, 47);
-const rose = Color.rgb(151, 100, 123);
-const blue = Color.rgb(108, 146, 179);
-const strengths = [_]u8{ 8, 18, 32, 49, 70, 96 };
-pub const max_fills_per_row = 15;
+pub const charcoal = Color.rgb(27, 30, 40);
+const rose = Color.rgb(116, 75, 93);
+const blue = Color.rgb(71, 111, 142);
+pub const max_fills_per_row = 128;
+const fields = [_]struct { cx: i64, cy: i64, rx: i64, ry: i64 }{
+    .{ .cx = 180, .cy = 750, .rx = 950, .ry = 900 },
+    .{ .cx = 930, .cy = 190, .rx = 860, .ry = 800 },
+    .{ .cx = 480, .cy = 480, .rx = 900, .ry = 900 },
+};
 
 pub fn render(surface: *ui.Surface) !void {
     try surface.validate();
-    const width = surface.width;
-    const height = surface.height;
+    const columns = @min(surface.width, max_fills_per_row);
     for (0..surface.height) |row| {
-        const y: u32 = @intCast(row);
-        const shade: u8 = @intCast(y * 5 / height);
+        const y: i64 = @intCast(row * 1024 / surface.height);
+        const shade: u8 = @intCast(row * 5 / surface.height);
         const base = Color.rgb(charcoal.r - shade, charcoal.g - shade, charcoal.b - shade);
-        surface.fillRect(0, @intCast(row), surface.width, 1, surface.encode(base));
-
-        // Nested parabolic spans make broad curved planes with restrained edge
-        // falloff. Their moving centers tilt the rose and blue forms diagonally.
-        for (strengths, 0..) |strength, layer| {
-            const inset: u32 = @intCast(layer);
-            shape(surface, y, width * 15 / 100 + y * width / (height * 9), height * 66 / 100, width * (59 - inset * 3) / 100, height * (94 - inset * 5) / 100, mix(base, rose, strength));
+        // Only retain three row terms. Apps share the native 16KiB stack
+        // budget, so a full column table cannot live in this call chain.
+        var y_squared: [fields.len]i64 = undefined;
+        inline for (fields, 0..) |geometry, i| {
+            const dy = @divTrunc((y - geometry.cy) * 1024, geometry.ry);
+            y_squared[i] = dy * dy;
         }
-        for (strengths, 0..) |strength, layer| {
-            const inset: u32 = @intCast(layer);
-            shape(surface, y, width * 86 / 100 - y * width / (height * 12), height * 28 / 100, width * (49 - inset * 3) / 100, height * (86 - inset * 5) / 100, mix(base, blue, strength));
+        for (0..columns) |column| {
+            const left: u32 = @intCast(column * surface.width / columns);
+            const right: u32 = @intCast((column + 1) * surface.width / columns);
+            const x: i64 = @intCast((@as(u64, left) + right) * 512 / surface.width);
+            const warm = field(x, 0, y_squared[0]) * 112 / 1024;
+            const cool = field(x, 1, y_squared[1]) * 122 / 1024;
+            const light = field(x, 2, y_squared[2]) * 12 / 1024;
+            const color = Color.rgb(
+                channel(base.r, rose.r, blue.r, warm, cool, light),
+                channel(base.g, rose.g, blue.g, warm, cool, light),
+                channel(base.b, rose.b, blue.b, warm, cool, light),
+            );
+            surface.fillRect(left, @intCast(row), right - left, 1, surface.encode(color));
         }
-        // Two quiet straight accents echo the curved planes without noise or
-        // per-pixel commands. All row writes remain clipped by the Surface.
-        span(surface, y, width * 30 / 100 + y * width / (height * 5), width * 30 / 100 + y * width / (height * 5) + @max(1, width / 48), mix(base, rose, 25));
-        span(surface, y, width * 72 / 100 - y * width / (height * 8), width * 72 / 100 - y * width / (height * 8) + @max(1, width / 160), mix(base, blue, 42));
     }
 }
 
-fn mix(base: Color, accent: Color, strength: u8) Color {
-    const inverse: u32 = 255 - @as(u32, strength);
-    return Color.rgb(
-        @intCast((@as(u32, base.r) * inverse + @as(u32, accent.r) * strength + 127) / 255),
-        @intCast((@as(u32, base.g) * inverse + @as(u32, accent.g) * strength + 127) / 255),
-        @intCast((@as(u32, base.b) * inverse + @as(u32, accent.b) * strength + 127) / 255),
-    );
+/// Squared falloff has zero slope at the light field's outer edge. Positions
+/// are normalized to 1024, so both tiny and reference surfaces share the same
+/// composition without a sharp ellipse outline or fixed-resolution asset.
+fn field(x: i64, comptime index: usize, y_squared: i64) u32 {
+    const geometry = fields[index];
+    const dx = @divTrunc((x - geometry.cx) * 1024, geometry.rx);
+    const distance = @divTrunc(dx * dx + y_squared, 1024);
+    const remaining = @max(0, 1024 - distance);
+    return @intCast(@divTrunc(remaining * remaining, 1024));
 }
 
-fn shape(surface: *ui.Surface, y: i64, cx: i64, cy: i64, rx: i64, ry: i64, color: Color) void {
-    if (rx == 0 or ry == 0) return;
-    const dy = y - cy;
-    if (@abs(dy) >= @as(u64, @intCast(ry))) return;
-    // Surface dimensions are validated <=16384; every product fits signed64.
-    const squared_radius = ry * ry;
-    const half = @divTrunc(rx * (squared_radius - dy * dy), squared_radius);
-    span(surface, y, cx - half, cx + half, color);
-}
-
-fn span(surface: *ui.Surface, y: i64, left: i64, right: i64, color: Color) void {
-    const start = @max(0, left);
-    const end = @min(@as(i64, surface.width), right);
-    if (end <= start) return;
-    surface.fillRect(@intCast(start), @intCast(y), @intCast(end - start), 1, surface.encode(color));
+fn channel(base: u8, warm: u8, cool: u8, warm_strength: u32, cool_strength: u32, light: u32) u8 {
+    const value = @as(u32, base) + (@as(u32, warm) - base) * warm_strength / 255 +
+        (@as(u32, cool) - base) * cool_strength / 255 + light;
+    return @intCast(value);
 }

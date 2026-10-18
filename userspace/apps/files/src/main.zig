@@ -105,6 +105,8 @@ fn frost(ctx: *anyopaque, x: u32, y: u32, width: u32, height: u32, material: ui.
 fn draw() void {
     const dimensions = rt.success(rt.syscall(abi.syscall.ui_geometry, 0, 0, 0));
     var surface = ui.Surface.initCommands(@intCast(dimensions >> 32), @truncate(dimensions), .{ .context = &client, .fillRect = &fill, .materialRect = &frost }) catch rt.exit(99);
+    // This retained kernel-hosted diagnostic keeps its original glyph contract.
+    surface.legacy_text = true;
     client.drawing_failed = false;
     app.renderWithWorkspace(&surface, &workspace, &model) catch rt.exit(99);
     rt.expect(!client.drawing_failed);

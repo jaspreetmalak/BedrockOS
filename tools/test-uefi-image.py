@@ -6,11 +6,15 @@ No arguments run structural and corruption tests without writing image files.
 """
 
 import binascii
+import argparse
+import copy
 import importlib.util
+import hashlib
 import os
 from pathlib import Path
 import struct
 import sys
+import tempfile
 import unittest
 from unittest import mock
 import uuid
@@ -26,13 +30,18 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def inspect_image(image, expected_payload):
+def inspect_image(image, expected_payload, *, arch="x86_64", expected_firmware=None, expected_drivers=None, expected_apps=None):
     """Check both GPTs, FAT geometry/mirrors/backups and the complete file chain.
 
     This reader derives all FAT positions from the serialized BPB and does not
     import builder geometry or layout helpers.
     """
     require(len(image) == DISK_BYTES, "image must be exactly 64 MiB")
+    if expected_apps is not None:
+        spec = importlib.util.spec_from_file_location("bedrock_image_check_app_packages", Path(__file__).with_name("package-apps.py"))
+        package = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(package)
+        package.validate_archive(expected_apps, {"x86_64": "x86_64", "arm64": "aarch64", "riscv64": "riscv64"}[arch])
     raw = memoryview(image)
     expected = memoryview(expected_payload)
     sectors = len(image) // SECTOR
@@ -135,6 +144,7 @@ def inspect_image(image, expected_payload):
 
     data_base = base + data_start * SECTOR
     allocated = set()
+    long_names = {}
 
     def chain(start):
         chain_clusters = []
@@ -158,13 +168,45 @@ def inspect_image(image, expected_payload):
     def directory(start):
         data = b"".join(bytes(cluster_data(cluster)) for cluster in chain(start))
         records = {}
+        pending = []
         for offset in range(0, len(data), 32):
             entry = data[offset:offset + 32]
             if entry[0] == 0:
+                require(not pending, "dangling FAT LFN records")
                 return records
-            require(entry[0] != 0xE5 and entry[11] != 0x0F, "unexpected deleted/LFN entry")
+            require(entry[0] != 0xE5, "unexpected deleted entry")
+            if entry[11] == 0x0F:
+                number = entry[0] & 0x3F
+                require(1 <= number <= 20 and entry[0] & 0x80 == 0 and entry[12] == 0 and entry[26:28] == bytes(2), "invalid FAT LFN fields")
+                if not pending:
+                    require(entry[0] & 0x40, "FAT LFN missing final flag")
+                else:
+                    require(entry[0] & 0x40 == 0 and number == pending[-1][0] - 1 and entry[13] == pending[0][1], "FAT LFN sequence or checksum")
+                words = struct.unpack_from("<5H", entry, 1) + struct.unpack_from("<6H", entry, 14) + struct.unpack_from("<2H", entry, 28)
+                pending.append((number, entry[13], words))
+                continue
             name = entry[:11]
             require(name not in records, "duplicate short directory name")
+            if pending:
+                require(pending[-1][0] == 1 and len(pending) == pending[0][0], "incomplete FAT LFN sequence")
+                checksum = 0
+                for byte in name:
+                    checksum = (((checksum & 1) << 7) + (checksum >> 1) + byte) & 255
+                require(checksum == pending[0][1], "FAT LFN short-name checksum")
+                words = sum((list(record[2]) for record in reversed(pending)), [])
+                if 0 in words:
+                    boundary = words.index(0)
+                    require(all(word == 0xFFFF for word in words[boundary + 1:]), "FAT LFN padding")
+                    words = words[:boundary]
+                require(0 < len(words) <= 255 and 0xFFFF not in words, "FAT LFN name extent")
+                try:
+                    decoded = struct.pack("<" + "H" * len(words), *words).decode("utf-16le")
+                except UnicodeDecodeError as error:
+                    raise ValueError("invalid FAT LFN UTF-16") from error
+                require(decoded not in (".", "..") and not any(character in '\\/:*?"<>|' or ord(character) < 32 for character in decoded), "invalid FAT LFN name")
+                require(decoded.casefold() not in {value.casefold() for (owner, _), value in long_names.items() if owner == start}, "duplicate FAT long name")
+                long_names[start, name] = decoded
+                pending.clear()
             first_cluster = struct.unpack_from("<H", entry, 20)[0] << 16 | struct.unpack_from("<H", entry, 26)[0]
             records[name] = (entry[11], first_cluster, struct.unpack_from("<I", entry, 28)[0])
         raise ValueError("directory lacks an end marker")
@@ -175,16 +217,20 @@ def inspect_image(image, expected_payload):
     efi_attribute, efi_cluster, efi_size = root_entries[b"EFI        "]
     require(efi_attribute == 0x10 and efi_size == 0, "EFI directory attributes")
     efi_entries = directory(efi_cluster)
-    require(set(efi_entries) == {b".          ", b"..         ", b"BOOT       "}, "EFI directory entries")
+    has_bedrock = expected_firmware is not None or expected_drivers is not None or expected_apps is not None
+    require(set(efi_entries) == {b".          ", b"..         ", b"BOOT       "} | ({b"BEDROCK    "} if has_bedrock else set()), "EFI directory entries")
     require(efi_entries[b".          "] == (0x10, efi_cluster, 0) and
             efi_entries[b"..         "] == (0x10, 0, 0), "EFI dot entries")
     boot_attribute, boot_cluster, boot_size = efi_entries[b"BOOT       "]
     require(boot_attribute == 0x10 and boot_size == 0, "BOOT directory attributes")
     boot_entries = directory(boot_cluster)
-    require(set(boot_entries) == {b".          ", b"..         ", b"BOOTX64 EFI"}, "BOOT directory entries")
+    short_boot = {"x86_64": b"BOOTX64 EFI", "arm64": b"BOOTAA64EFI", "riscv64": b"BOOTRI~1EFI"}[arch]
+    require(set(boot_entries) == {b".          ", b"..         ", short_boot}, "BOOT directory entries")
+    if arch == "riscv64":
+        require(long_names.get((boot_cluster, short_boot)) == "BOOTRISCV64.EFI", "RISC-V removable LFN")
     require(boot_entries[b".          "] == (0x10, boot_cluster, 0) and
             boot_entries[b"..         "] == (0x10, efi_cluster, 0), "BOOT dot entries")
-    file_attribute, file_cluster, file_size = boot_entries[b"BOOTX64 EFI"]
+    file_attribute, file_cluster, file_size = boot_entries[short_boot]
     require(file_attribute == 0x20 and file_size == len(expected) and file_size > 0, "BOOTX64.EFI size/attributes")
     file_chain = chain(file_cluster)
     require(len(file_chain) == (file_size + cluster_bytes - 1) // cluster_bytes, "BOOTX64.EFI chain length")
@@ -194,6 +240,40 @@ def inspect_image(image, expected_payload):
         data = cluster_data(cluster)
         require(data[:amount] == expected[position:position + amount], "BOOTX64.EFI payload differs")
         require(not any(data[amount:]), "BOOTX64.EFI final-cluster padding")
+    if has_bedrock:
+        attributes, bedrock_cluster, size = efi_entries[b"BEDROCK    "]
+        require(attributes == 0x10 and size == 0, "Bedrock directory attributes")
+        bedrock = directory(bedrock_cluster)
+        expected_children = {b".          ", b"..         "}
+        if expected_firmware is not None:
+            expected_children.add(b"FIRMWARE   ")
+        if expected_drivers is not None:
+            expected_children.add(b"DRIVERS    ")
+        if expected_apps is not None:
+            expected_children.add(b"APPS       ")
+        require(set(bedrock) == expected_children and bedrock[b".          "] == (0x10, bedrock_cluster, 0) and bedrock[b"..         "] == (0x10, efi_cluster, 0), "Bedrock directory entries")
+        for folder, expected_assets, label in ((b"FIRMWARE   ", expected_firmware, "Firmware"),
+                                               (b"DRIVERS    ", expected_drivers, "Drivers"),
+                                               (b"APPS       ", {"apps.bap": expected_apps} if expected_apps is not None else None, "Apps")):
+            if expected_assets is None:
+                continue
+            attributes, asset_cluster, size = bedrock[folder]
+            require(attributes == 0x10 and size == 0, label + " directory attributes")
+            asset_directory = directory(asset_cluster)
+            require(asset_directory[b".          "] == (0x10, asset_cluster, 0) and asset_directory[b"..         "] == (0x10, bedrock_cluster, 0), label + " dot entries")
+            named = {long_names.get((asset_cluster, name)): record for name, record in asset_directory.items() if name not in (b".          ", b"..         ")}
+            require(set(named) == set(expected_assets), label + " long names differ")
+            for name, expected_bytes in expected_assets.items():
+                attributes, start, size = named[name]
+                require(attributes == 0x20 and size == len(expected_bytes), label + " size/attributes")
+                blocks = chain(start)
+                require(len(blocks) == (size + cluster_bytes - 1) // cluster_bytes, label + " chain length")
+                for index, cluster in enumerate(blocks):
+                    position = index * cluster_bytes
+                    amount = min(cluster_bytes, size - position)
+                    data = cluster_data(cluster)
+                    require(data[:amount] == expected_bytes[position:position + amount], label + " payload differs")
+                    require(not any(data[amount:]), label + " final-cluster padding")
     require(sum(fat_value(cluster) != 0 for cluster in range(2, clusters + 2)) == len(allocated),
             "orphaned FAT allocations")
     return {
@@ -270,6 +350,336 @@ class ImageTests(unittest.TestCase):
         result = inspect_image(image, payload)
         self.assertEqual(result["free_clusters"], 0)
 
+    def firmware_fixture(self):
+        data = {
+            "WIFI_MT7922_patch_mcu_1_1_hdr.bin": b"patch-model" * 67,
+            "WIFI_RAM_CODE_MT7922_1.bin": b"ram-model" * 125,
+            "LICENCE.mediatek": b"model licence only - not a distributable vendor licence",
+        }
+        expected = {name: (len(value), hashlib.sha256(value).hexdigest()) for name, value in data.items()}
+        return data, expected
+
+    def profile_fixture(self):
+        data = bytearray(128 + 192)
+        data[:8] = b"BRDBRD01"
+        data[40:72] = hashlib.sha256(data).digest()
+        return bytes(data)
+
+    def driver_fixture(self):
+        # Synthetic bytes are checked by the ordinary production metadata/ELF
+        # validator. There is no fixture switch in the image builder.
+        spec = importlib.util.spec_from_file_location("image_driver_test_helpers", Path(__file__).with_name("test-driver-packages.py"))
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        data = helper.synthetic_module()
+        metadata = {"schema_version": 1, "id": "org.bedrock.mt7922", "package_version": "0.1.0",
+                    "architecture": "x86_64", "driver_abi": {"major": 1, "minor": 0},
+                    "module": {"file": "mt7922.bdm", "byte_length": len(data), "sha256": hashlib.sha256(data).hexdigest()}}
+        manifest = {"schema_version": 1, "architecture": "x86_64", "driver_abi": {"major": 1, "minor": 0}, "packages": [metadata]}
+        return {"manifest.json": helper.packager.json_bytes(manifest), "mt7922.bdm": data}, manifest, helper
+
+    def apps_fixture(self, arch="x86_64", variant=0):
+        package = self.builder.app_packager()
+        catalogue = package.read_catalogue(package.DEFAULT_CATALOGUE)
+        machine = package.ARCHITECTURES[arch]
+        executable = bytearray(65)
+        executable[:7] = b"\x7fELF\x02\x01\x01"
+        struct.pack_into("<HHI", executable, 16, 2, machine, 1)
+        struct.pack_into("<H", executable, 52, 64)
+        executable[-1] = variant
+        return package.build_archive(catalogue, {app["name"]: bytes(executable) for app in catalogue}, arch)
+
+    def test_installed_apps_extract_exactly_on_all_three_architectures(self):
+        for arch in ("x86_64", "arm64", "riscv64"):
+            with self.subTest(arch=arch):
+                apps = self.apps_fixture(arch)
+                image = self.builder.build_image(self.payload, arch=arch, apps=apps)
+                inspect_image(image, self.payload, arch=arch, expected_apps=apps)
+                self.assertEqual(image, self.builder.build_image(self.payload, arch=arch, apps=apps))
+                with self.assertRaisesRegex(ValueError, "EFI directory entries"):
+                    inspect_image(image, self.payload, arch=arch)
+
+    def test_apps_coexist_with_firmware_and_selected_drivers(self):
+        apps = self.apps_fixture()
+        drivers, _, _ = self.driver_fixture()
+        firmware, expected = self.firmware_fixture()
+        with mock.patch.object(self.builder, "FIRMWARE_FILES", expected):
+            image = self.builder.build_image(self.payload, apps=apps, drivers=drivers, firmware=firmware)
+            inspect_image(image, self.payload, expected_apps=apps, expected_drivers=drivers, expected_firmware=firmware)
+
+    def test_apps_wrong_target_and_corrupt_hashes_fail_before_image_creation(self):
+        apps = self.apps_fixture()
+        for arch in ("arm64", "riscv64"):
+            with self.subTest(arch=arch), self.assertRaisesRegex(ValueError, "header"):
+                self.builder.build_image(self.payload, arch=arch, apps=apps)
+        for offset in (64, len(apps) - 1):
+            changed = bytearray(apps)
+            changed[offset] ^= 1
+            with self.subTest(offset=offset), self.assertRaises(ValueError):
+                self.builder.build_image(self.payload, apps=changed)
+            with self.assertRaises(ValueError):
+                inspect_image(self.image, self.payload, expected_apps=changed)
+
+    def test_apps_disk_payload_corruption_and_identity_binding(self):
+        apps = self.apps_fixture()
+        image = self.builder.build_image(self.payload, apps=apps)
+        offset = image.find(apps)
+        self.assertGreater(offset, 0)
+        self.assertEqual(offset, image.rfind(apps))
+        image[offset + len(apps) - 1] ^= 1
+        with self.assertRaisesRegex(ValueError, "Apps payload differs"):
+            inspect_image(image, self.payload, expected_apps=apps)
+        original = self.builder.build_image(self.payload, apps=apps)
+        changed = self.builder.build_image(self.payload, apps=self.apps_fixture(variant=1))
+        self.assertNotEqual(original[512:604], self.image[512:604])
+        self.assertNotEqual(original[512:604], changed[512:604])
+
+    def test_explicit_apps_file_roundtrip_and_output_aliases_are_safe(self):
+        apps = self.apps_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "apps.bap"
+            source.write_bytes(apps)
+            application = directory / "boot.efi"
+            application.write_bytes(self.payload)
+            output = directory / "image.img"
+            self.builder.write_image(application, output, apps_path=source)
+            original = output.read_bytes()
+            inspect_image(original, self.payload, expected_apps=apps)
+            with self.assertRaisesRegex(ValueError, "different files"):
+                self.builder.write_image(application, source, apps_path=source)
+            self.assertEqual(apps, source.read_bytes())
+            source.write_bytes(apps[:-1] + b"!")
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                self.builder.write_image(application, output, apps_path=source)
+            self.assertEqual(original, output.read_bytes())
+
+    def test_apps_special_sources_are_rejected_before_opening(self):
+        with self.assertRaisesRegex(ValueError, "ordinary files"):
+            self.builder.load_apps(Path(__file__).parent)
+        with mock.patch.object(self.builder, "os") as operating_system:
+            operating_system.name = "nt"
+            with self.assertRaisesRegex(ValueError, "device/namespace"):
+                self.builder.load_apps(Path("//./PhysicalDrive0"))
+
+    def test_driver_files_and_firmware_roundtrip_and_identity_bind_all_bytes(self):
+        drivers, _, _ = self.driver_fixture()
+        firmware, expected = self.firmware_fixture()
+        with mock.patch.object(self.builder, "FIRMWARE_FILES", expected):
+            for assets in (None, firmware):
+                image = self.builder.build_image(self.payload, drivers=drivers, firmware=assets)
+                inspect_image(image, self.payload, expected_drivers=drivers, expected_firmware=assets)
+                self.assertEqual(image, self.builder.build_image(self.payload, drivers=dict(reversed(list(drivers.items()))), firmware=assets))
+                self.assertNotEqual(image[512:604], self.builder.build_image(self.payload, firmware=assets)[512:604])
+
+    def test_other_architectures_can_package_empty_selected_driver_manifests(self):
+        package = self.builder.driver_packager()
+        for arch, driver_arch in (("arm64", "aarch64"), ("riscv64", "riscv64")):
+            manifest = {"schema_version": 1, "architecture": driver_arch, "driver_abi": {"major": 1, "minor": 0}, "packages": []}
+            assets = {"manifest.json": package.json_bytes(manifest)}
+            with self.subTest(arch=arch):
+                inspect_image(self.builder.build_image(self.payload, arch=arch, drivers=assets), self.payload, arch=arch, expected_drivers=assets)
+
+    def test_driver_preflight_rejects_wrong_hash_target_unknown_packages_and_extra_files(self):
+        drivers, manifest, helper = self.driver_fixture()
+        changed = dict(drivers)
+        changed["mt7922.bdm"] = changed["mt7922.bdm"][:-1] + b"!"
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            self.builder.build_image(self.payload, drivers=changed)
+        for mode in ("architecture", "unknown", "unsupported-platform", "duplicate", "fixture-id"):
+            metadata = copy.deepcopy(manifest)
+            assets = dict(drivers)
+            if mode == "architecture":
+                metadata["architecture"] = "riscv64"
+            elif mode == "unknown":
+                metadata["packages"][0]["id"] = "org.bedrock.fixture"
+            elif mode == "unsupported-platform":
+                metadata["architecture"] = metadata["packages"][0]["architecture"] = "aarch64"
+            elif mode == "duplicate":
+                metadata["packages"].append(copy.deepcopy(metadata["packages"][0]))
+            else:
+                data = bytearray(assets["mt7922.bdm"])
+                data[0x180 + 20 + 40:0x180 + 20 + 64] = b"org.bedrock.fixture" + bytes(5)
+                assets["mt7922.bdm"] = bytes(data)
+                metadata["packages"][0]["module"]["sha256"] = hashlib.sha256(data).hexdigest()
+            assets["manifest.json"] = helper.packager.json_bytes(metadata)
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                self.builder.build_image(self.payload, arch="arm64" if mode == "unsupported-platform" else "x86_64", drivers=assets)
+        for assets in ({}, {"manifest.json": drivers["manifest.json"]}, dict(drivers, unexpected=b"extra")):
+            with self.subTest(names=list(assets)), self.assertRaises(ValueError):
+                self.builder.build_image(self.payload, drivers=assets)
+
+    def test_selected_driver_directory_safe_alias_and_exact_files(self):
+        drivers, _, _ = self.driver_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "drivers"
+            directory.mkdir()
+            for name, data in drivers.items():
+                (directory / name).write_bytes(data)
+            application = root / "app.efi"
+            application.write_bytes(self.payload)
+            output = root / "image.img"
+            self.builder.write_image(application, output, driver_dir=directory)
+            inspect_image(output.read_bytes(), self.payload, expected_drivers=drivers)
+            for name in drivers:
+                source = directory / name
+                original = source.read_bytes()
+                with self.subTest(alias=name), self.assertRaisesRegex(ValueError, "different files"):
+                    self.builder.write_image(application, source, driver_dir=directory)
+                self.assertEqual(source.read_bytes(), original)
+            (directory / "extra.bdm").write_bytes(b"undeclared")
+            before = output.read_bytes()
+            with self.assertRaisesRegex(ValueError, "undeclared"):
+                self.builder.write_image(application, output, driver_dir=directory)
+            self.assertEqual(output.read_bytes(), before)
+
+    def test_local_package_convenience_matches_selected_tree_and_guards_inputs(self):
+        _, _, helper = self.driver_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            modules = root / "modules"
+            modules.mkdir()
+            directory, _ = helper.write_package(modules)
+            selected = root / "selected"
+            helper.packager.stage_packages(helper.catalogue(), helper.inventory(), "x86_64", modules, selected, True)
+            expected = self.builder.load_driver_directory(selected / "EFI/Bedrock/Drivers")
+            application = root / "app.efi"
+            application.write_bytes(self.payload)
+            output = root / "image.img"
+            self.builder.write_image(application, output, driver_packages=modules, all_compatible=True)
+            inspect_image(output.read_bytes(), self.payload, expected_drivers=expected)
+            for name in ("package.json", "mt7922.bdm"):
+                source = directory / name
+                original = source.read_bytes()
+                with self.subTest(alias=name), self.assertRaisesRegex(ValueError, "different files"):
+                    self.builder.write_image(application, source, driver_packages=modules, all_compatible=True)
+                self.assertEqual(source.read_bytes(), original)
+            before = output.read_bytes()
+            with self.assertRaisesRegex(ValueError, "inventory"):
+                self.builder.write_image(application, output, driver_packages=modules)
+            self.assertEqual(output.read_bytes(), before)
+
+    def test_actual_cached_module_selected_and_serialized_when_built(self):
+        root = Path(__file__).resolve().parent.parent
+        source = root / "zig-out/drivers"
+        if not (source / "x86_64/mt7922/package.json").is_file():
+            self.skipTest("actual driver build unavailable; no build or download is attempted")
+        assets = self.builder.select_driver_assets(source, all_compatible=True)
+        image = self.builder.build_image(self.payload, drivers=assets)
+        inspect_image(image, self.payload, expected_drivers=assets)
+        self.assertEqual(assets["mt7922.bdm"], (source / "x86_64/mt7922/mt7922.bdm").read_bytes())
+
+    def test_all_removable_names_and_firmware_lfn_bytes_extract_exactly(self):
+        assets, expected = self.firmware_fixture()
+        assets[self.builder.PROFILE_NAME] = self.profile_fixture()
+        with mock.patch.object(self.builder, "FIRMWARE_FILES", expected):
+            for arch in ("x86_64", "arm64", "riscv64"):
+                with self.subTest(arch=arch):
+                    image = self.builder.build_image(self.payload, arch=arch, firmware=assets)
+                    inspect_image(image, self.payload, arch=arch, expected_firmware=assets)
+            first = self.builder.build_image(self.payload, arch="riscv64", firmware=assets)
+            self.assertEqual(first, self.builder.build_image(self.payload, arch="riscv64", firmware=dict(reversed(list(assets.items())))))
+        for arch in ("arm64", "riscv64"):
+            inspect_image(self.builder.build_image(self.payload, arch=arch), self.payload, arch=arch)
+
+    def test_lfn_checksum_sequence_and_padding_corruption_are_detected(self):
+        assets, expected = self.firmware_fixture()
+        with mock.patch.object(self.builder, "FIRMWARE_FILES", expected):
+            image = self.builder.build_image(self.payload, firmware=assets)
+        inspect_image(image, self.payload, expected_firmware=assets)
+        # The first asset is LICENCE.mediatek. Its highest LFN entry is at the
+        # Firmware directory's byte64, identified from its UTF-16 tail.
+        marker = "tek".encode("utf-16le") + bytes(2)
+        candidates = [offset for offset in range(self.layout["file_offset"], len(image) - 32, 32)
+                      if image[offset + 11] == 0x0F and image[offset + 1:offset + 9] == marker]
+        self.assertEqual(len(candidates), 1)
+        entry = candidates[0]
+        for position, value, message in ((entry + 13, image[entry + 13] ^ 1, "checksum"),
+                                         (entry, 0x41, "sequence"),
+                                         (entry + 9, 0x00, "padding")):
+            with self.subTest(position=position):
+                previous = image[position]
+                image[position] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    inspect_image(image, self.payload, expected_firmware=assets)
+                image[position] = previous
+
+    def test_firmware_missing_wrong_hash_license_and_profile_rejected_preflight(self):
+        assets, expected = self.firmware_fixture()
+        with mock.patch.object(self.builder, "FIRMWARE_FILES", expected):
+            bad = dict(assets)
+            bad.pop("LICENCE.mediatek")
+            with self.assertRaisesRegex(ValueError, "licence"):
+                self.builder.build_image(self.payload, firmware=bad)
+            for name in assets:
+                bad = dict(assets)
+                bad[name] = b"!" + bad[name][1:]
+                with self.subTest(name=name), self.assertRaisesRegex(ValueError, "size/hash"):
+                    self.builder.build_image(self.payload, firmware=bad)
+            for profile in (b"bad", bytes(128), self.profile_fixture()[:-1], self.profile_fixture() + bytes(192)):
+                bad = dict(assets)
+                bad[self.builder.PROFILE_NAME] = profile
+                with self.assertRaisesRegex(ValueError, "MT7922.board"):
+                    self.builder.build_image(self.payload, firmware=bad)
+            bad = dict(assets, unexpected=b"not packaged")
+            with self.assertRaisesRegex(ValueError, "exact pinned"):
+                self.builder.build_image(self.payload, firmware=bad)
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            self.builder.build_image(self.payload, arch="other")
+
+    def test_explicit_firmware_directory_roundtrip_and_output_alias_are_safe(self):
+        assets, expected = self.firmware_fixture()
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(self.builder, "FIRMWARE_FILES", expected):
+            directory = Path(temporary)
+            for name, data in assets.items():
+                (directory / name).write_bytes(data)
+            application = directory / "app.efi"
+            application.write_bytes(self.payload)
+            output = directory / "image.img"
+            self.builder.write_image(application, output, arch="arm64", firmware_dir=directory)
+            inspect_image(output.read_bytes(), self.payload, arch="arm64", expected_firmware=assets)
+            firmware_output = directory / "LICENCE.mediatek"
+            before = firmware_output.read_bytes()
+            with self.assertRaisesRegex(ValueError, "different files"):
+                self.builder.write_image(application, firmware_output, firmware_dir=directory)
+            self.assertEqual(before, firmware_output.read_bytes())
+            (directory / "LICENCE.mediatek").unlink()
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                self.builder.write_image(application, output, firmware_dir=directory)
+            # Input failure never replaces the prior complete image.
+            inspect_image(output.read_bytes(), self.payload, arch="arm64", expected_firmware=assets)
+
+    def test_firmware_directory_rejects_special_or_symlink_sources(self):
+        with self.assertRaisesRegex(ValueError, "ordinary directory"):
+            self.builder.load_firmware(Path(__file__))
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / next(iter(self.builder.FIRMWARE_FILES))).mkdir()
+            with self.assertRaisesRegex(ValueError, "ordinary files"):
+                self.builder.load_firmware(directory)
+        # No device pathname is opened, even with the optional directory path.
+        with mock.patch.object(self.builder, "os") as operating_system:
+            operating_system.name = "nt"
+            with self.assertRaisesRegex(ValueError, "device/namespace"):
+                self.builder.load_firmware(Path("//./PhysicalDrive0"))
+
+    def test_real_pinned_vendor_bytes_extract_on_all_three_profiles_when_cached(self):
+        cache = Path(__file__).resolve().parent.parent / ".zig-cache/upstream-wifi/firmware/afabaf773c4c2e2c841429933a6a084a5af4d14d"
+        paths = {name: cache / ("LICENSES" if name == "LICENCE.mediatek" else "mediatek") / name for name in self.builder.FIRMWARE_FILES}
+        if not all(path.is_file() for path in paths.values()):
+            self.skipTest("pinned linux-firmware cache is not available; no download is attempted")
+        assets = {}
+        for name, path in paths.items():
+            self.builder.ordinary_path(path)
+            with path.open("rb") as source:
+                assets[name] = source.read(self.builder.FIRMWARE_FILES[name][0] + 1)
+        self.builder.validate_firmware(assets)
+        for arch in ("x86_64", "arm64", "riscv64"):
+            with self.subTest(arch=arch):
+                image = self.builder.build_image(self.payload, arch=arch, firmware=assets)
+                inspect_image(image, self.payload, arch=arch, expected_firmware=assets)
+
     def test_file_only_paths_and_same_file_output_are_rejected_before_writing(self):
         script = Path(__file__)
         with self.assertRaisesRegex(ValueError, "different files"):
@@ -317,11 +727,20 @@ class ImageTests(unittest.TestCase):
 def main():
     if len(sys.argv) == 1:
         return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(ImageTests)).wasSuccessful() else 1
-    if len(sys.argv) != 3:
-        print(__doc__, file=sys.stderr)
-        return 2
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("application", type=Path)
+    parser.add_argument("image", type=Path)
+    parser.add_argument("--arch", choices=("x86_64", "arm64", "riscv64"), default="x86_64")
+    parser.add_argument("--firmware-dir", type=Path)
+    parser.add_argument("--apps", type=Path)
+    drivers = parser.add_mutually_exclusive_group()
+    drivers.add_argument("--driver-dir", type=Path)
+    drivers.add_argument("--driver-packages", type=Path)
+    parser.add_argument("--inventory", type=Path)
+    parser.add_argument("--all-compatible", action="store_true")
+    args = parser.parse_args()
     try:
-        application, image_path = Path(sys.argv[1]), Path(sys.argv[2])
+        application, image_path = args.application, args.image
         builder = load_builder()
         builder.ordinary_path(application)
         builder.ordinary_path(image_path)
@@ -329,11 +748,19 @@ def main():
         with application.open("rb") as source:
             expected = source.read(builder.MAX_PAYLOAD_SIZE + 1)
         require(len(expected) <= builder.MAX_PAYLOAD_SIZE, "application exceeds ESP capacity")
-        result = inspect_image(image_path.read_bytes(), expected)
+        firmware = builder.load_firmware(args.firmware_dir) if args.firmware_dir is not None else None
+        if args.driver_dir is not None and (args.inventory is not None or args.all_compatible):
+            raise ValueError("selected driver directory cannot be combined with package selection options")
+        if args.driver_packages is None and (args.inventory is not None or args.all_compatible):
+            raise ValueError("inventory/offline selection requires --driver-packages")
+        driver_assets = (builder.load_driver_directory(args.driver_dir, args.arch) if args.driver_dir is not None else
+                         builder.select_driver_assets(args.driver_packages, args.arch, args.inventory, args.all_compatible) if args.driver_packages is not None else None)
+        apps = builder.load_apps(args.apps, args.arch) if args.apps is not None else None
+        result = inspect_image(image_path.read_bytes(), expected, arch=args.arch, expected_firmware=firmware, expected_drivers=driver_assets, expected_apps=apps)
     except (OSError, ValueError) as error:
         print(f"UEFI image check failed: {error}", file=sys.stderr)
         return 1
-    print(f"UEFI image valid: {result['image_bytes']} bytes, FAT32 {result['data_clusters']} clusters, BOOTX64.EFI {result['file_bytes']} bytes")
+    print(f"UEFI image valid: {result['image_bytes']} bytes, FAT32 {result['data_clusters']} clusters, {builder.BOOT_NAMES[args.arch]} {result['file_bytes']} bytes")
     return 0
 
 

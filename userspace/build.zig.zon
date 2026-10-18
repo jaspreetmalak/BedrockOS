@@ -6,6 +6,9 @@
     .dependencies = .{
         .files_app = .{ .path = "apps/files" },
         .networkkit = .{ .path = "../frameworks/public/NetworkKit" },
+        .axisui = .{ .path = "../frameworks/public/AxisUI" },
+        .desktop_shell = .{ .path = "apps/shell" },
+        .window_server = .{ .path = "services/window-server" },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "runtime", "apps" },
+    .paths = .{ "build.zig", "build.zig.zon", "runtime", "apps", "services" },
 }

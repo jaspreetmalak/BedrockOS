@@ -112,7 +112,29 @@ pub fn populate(map: uefi.tables.MemoryMapSlice, info: *protocol.BootInfo) Error
     if (info.loader_reserved.base < try info.kernel_reserved.endExclusive() and
         info.kernel_reserved.base < try info.loader_reserved.endExclusive())
         return error.OverlappingBootArenas;
+    if (info.wifi.reservation.length != 0) {
+        try validateArena(map, order[0..count], info.wifi.reservation);
+        const end = try info.wifi.reservation.endExclusive();
+        for ([_]protocol.PhysicalRange{ info.loader_reserved, info.kernel_reserved }) |arena|
+            if (info.wifi.reservation.base < try arena.endExclusive() and arena.base < end)
+                return error.OverlappingBootArenas;
+    }
 
+    if (info.drivers.count > protocol.max_boot_drivers) return error.InvalidBootArena;
+    if (info.apps.reservation.length != 0) {
+        try validateArena(map, order[0..count], info.apps.reservation);
+        const end = try info.apps.reservation.endExclusive();
+        for ([_]protocol.PhysicalRange{ info.loader_reserved, info.kernel_reserved, info.wifi.reservation }) |arena|
+            if (arena.length != 0 and info.apps.reservation.base < try arena.endExclusive() and arena.base < end) return error.OverlappingBootArenas;
+    }
+    for (info.drivers.records[0..info.drivers.count], 0..) |driver, i| {
+        try validateArena(map, order[0..count], driver.reservation);
+        const end = try driver.reservation.endExclusive();
+        for ([_]protocol.PhysicalRange{ info.loader_reserved, info.kernel_reserved, info.wifi.reservation, info.apps.reservation }) |arena|
+            if (arena.length != 0 and driver.reservation.base < try arena.endExclusive() and arena.base < end) return error.OverlappingBootArenas;
+        for (info.drivers.records[0..i]) |prior|
+            if (driver.reservation.base < try prior.reservation.endExclusive() and prior.reservation.base < end) return error.OverlappingBootArenas;
+    }
     var builder: protocol.MemoryMap = .{};
     var pending_ram: ?protocol.PhysicalRange = null;
     var boot_ram: ?protocol.PhysicalRange = null;
@@ -158,6 +180,10 @@ pub fn populate(map: uefi.tables.MemoryMapSlice, info: *protocol.BootInfo) Error
     if (pending_reservation) |pending| try builder.addReservation(pending.range, pending.kind);
     try builder.addReservation(info.loader_reserved, .loader_reclaimable);
     try builder.addReservation(info.kernel_reserved, .kernel);
+    if (info.wifi.reservation.length != 0)
+        try builder.addReservation(info.wifi.reservation, .reserved);
+    for (info.drivers.records[0..info.drivers.count]) |driver| try builder.addReservation(driver.reservation, .reserved);
+    if (info.apps.reservation.length != 0) try builder.addReservation(info.apps.reservation, .reserved);
     if (info.framebuffer.base != 0)
         try builder.addReservation(.{ .base = info.framebuffer.base, .length = info.framebuffer.size }, .mmio);
     info.ram = boot_ram orelse return error.NoBootRam;
@@ -167,6 +193,32 @@ pub fn populate(map: uefi.tables.MemoryMapSlice, info: *protocol.BootInfo) Error
     info.firmware_memory_map = .{ .base = @intFromPtr(map.ptr), .length = raw_size[0] };
     info.firmware_descriptor_size = @intCast(map.info.descriptor_size);
     info.firmware_descriptor_version = map.info.descriptor_version;
+}
+
+test "EFI Wi-Fi assets remain reserved and require distinct owned loader pages" {
+    var descriptors = [_]uefi.tables.MemoryDescriptor{
+        testDescriptor(0x100000, 0x300, .loader_data, false),
+        testDescriptor(0x800000, 0x200, .loader_data, false),
+    };
+    var info = testInfo();
+    info.wifi.reservation = .{ .base = 0x800000, .length = 0x200000 };
+    try populate(testMap(&descriptors), &info);
+    var found = false;
+    for (info.memory_regions[0..info.memory_region_count]) |region| {
+        if (region.range.base == info.wifi.reservation.base) {
+            try std.testing.expectEqual(@backingInt(protocol.MemoryKind.reserved), region.kind);
+            try std.testing.expectEqual(info.wifi.reservation, region.range);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+    descriptors[1].type = .conventional_memory;
+    try std.testing.expectError(error.BootArenaNotOwned, populate(testMap(&descriptors), &info));
+    descriptors[1].type = .loader_data;
+    descriptors[1].attribute.memory_runtime = true;
+    try std.testing.expectError(error.BootArenaNotOwned, populate(testMap(&descriptors), &info));
+    info.wifi.reservation = info.loader_reserved;
+    try std.testing.expectError(error.OverlappingBootArenas, populate(testMap(&descriptors), &info));
 }
 
 fn testDescriptor(base: u64, pages: u64, kind: uefi.tables.MemoryType, runtime: bool) uefi.tables.MemoryDescriptor {

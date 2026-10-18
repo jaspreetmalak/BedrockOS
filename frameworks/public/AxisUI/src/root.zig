@@ -31,6 +31,8 @@ pub const font = @import("font.zig");
 pub const icons = @import("icons.zig");
 pub const Icon = icons.Icon;
 pub const drawIcon = icons.draw;
+pub const menu = @import("menu.zig");
+pub const tabs = @import("tabs.zig");
 pub const materials = @import("materials.zig");
 pub const Material = types.Material;
 pub const Backdrop = materials.Backdrop;
@@ -38,6 +40,9 @@ pub const Backdrop = materials.Backdrop;
 test {
     _ = @import("tests.zig");
     _ = @import("material_tests.zig");
+    _ = @import("font_tests.zig");
+    _ = @import("menu_tests.zig");
+    _ = @import("tabs_tests.zig");
     _ = input;
     _ = @import("state.zig");
 }

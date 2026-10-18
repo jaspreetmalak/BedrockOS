@@ -1,11 +1,36 @@
 # Private frameworks
 
-This directory is reserved for reusable internal OS APIs used by Bedrock's own
-services and applications. [NetworkCore](NetworkCore/README.md) is the first
-implemented private framework: bounded Ethernet/ARP/IPv4/UDP packet mechanisms,
+This directory provides reusable internal OS APIs used by Bedrock's own
+bootloader, kernel, driver modules, services and applications.
+
+```text
+frameworks/private/
+  DriverKit/    shared versioned driver ABI and bounded loader/linker tools
+  AnvilCore/    trusted texture execution, resource lifetimes and graphics validation
+  NetworkCore/  trusted packet/endpoint and Wi-Fi controller mechanisms
+```
+
+[DriverKit](DriverKit/README.md) supplies the shared versioned C driver ABI,
+bounded ELF loader and linker tools, and opaque memory-token records.
+Hardware-specific chipset/station implementations, module entry points and
+boot ownership remain under `../../drivers/`. Modules currently execute with
+kernel privileges; separate packaging and framework placement do not provide
+process isolation.
+
+[NetworkCore](NetworkCore/README.md) is the first implemented private framework:
+bounded Ethernet/ARP/IPv4/UDP packet mechanisms,
 connected endpoint queues, transport callbacks and a bounded Wi-Fi controller
 used by the kernel runtime.
 Its source directory grants no execution or device privilege.
+
+[AnvilCore](AnvilCore/README.md) implements Anvil's trusted CPU graphics provider:
+bounded texture imports, read-only access, generational tokens, prevalidated
+fill/copy commands and genuine completion fences. The essential boot backend
+lives under [`drivers/gpu/`](../../drivers/gpu/README.md). Display-service identity,
+surface grants and lease checks remain in the kernel broker before dispatch.
+The public [Anvil](../public/Anvil/README.md) API imports no kernel code. GPU
+hardware drivers, optional GPU module loading and general app GPU contexts are
+future work; the current backend reports software execution.
 
 Future shared display-service IPC clients, surface-ownership APIs and broker
 helpers can live here once their services exist. Internal interfaces may evolve

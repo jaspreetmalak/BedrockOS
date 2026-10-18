@@ -13,7 +13,7 @@ physical-PC qualification.
 ## Startup and ownership
 
 The loader requests a 2 MiB loader arena with `AllocateAnyPages`. It separately
-allocates the kernel's 2 MiB load span, retaining any padding needed for ELF
+allocates the kernel's 4 MiB load span, retaining any padding needed for ELF
 alignment. The arenas can occupy different firmware RAM banks; neither has a
 fixed physical address. The bounded ELF loader checks the image before copying
 its segments, zeroes its declared memory span, and applies symbol-free
@@ -34,14 +34,14 @@ handoff and validates its loaded image/stack against the advertised reservation.
 
 | Offset within the loader arena | Retained purpose |
 | --- | --- |
-| `0x000000..0x000b00` | Current 2,816-byte draft v0.2 BootInfo |
+| `0x000000..0x001028` | Current 4,136-byte draft v0.6 BootInfo |
 | `0x040000..0x080000` | Bounded raw final EFI memory-map buffer |
 | `0x080000..0x180000` | Page-table pool, at most 256 pages |
 | `0x180000..0x181000` | Copied transition block, at most one page |
 | `0x181000..0x181028` | Transition context: four addresses and a byte count |
 | `0x1f0000..0x200000` | Loader transition stack |
 
-The kernel's stack occupies offsets `0x1f0000..0x200000` from its aligned load
+The kernel's stack occupies offsets `0x3f0000..0x400000` from its aligned load
 base. Its image and BSS must fit below that stack. All handoff addresses are
 physical addresses after allocation, rather than these offsets.
 
@@ -59,10 +59,10 @@ only when its complete range is covered by WC-capable descriptors, otherwise UC.
 Firmware MTRR state is retained. Initial mappings still allow supervisor
 read/write/execution; this is a bootstrap mapping policy.
 
-The normal kernel selects the GOP framebuffer described by the loader and draws
-text itself, including memory diagnostics and breakpoint recovery. It does not
-use UEFI text output after exit. The smoke variant uses the documented emulator
-COM1 console and `isa-debug-exit` only for test capture and termination.
+The kernel uses its own console after firmware exit. Primary desktop images
+retain COM1 diagnostics and provide the described GOP framebuffer to checked
+user-space compositor scanout. Only dedicated acceptance variants finish
+through `isa-debug-exit`; the normal installed desktop keeps running.
 
 ## Build and test
 
@@ -89,11 +89,13 @@ and reserves it through UEFI; it fails cleanly if no suitable range is available
 
 The installed removable-media application is
 `zig-out/uefi/x86_64/EFI/BOOT/BOOTX64.EFI`. It already contains its matching
-kernel bytes. The normal run displays a framebuffer window and idles after
-startup; close QEMU or use Ctrl+C to end the run. Tests are headless and bounded.
+kernel bytes, alongside `EFI/Bedrock/Apps/apps.bap`. The normal run starts the
+installed compositor, shell and Files, with persistent app-2 disk data. Close
+QEMU or use Ctrl+C to end the run. The underlying boot smoke tests remain
+bounded; `test-service-desktop-x86_64` exercises the primary graphical runtime.
 
 For a standalone GPT/FAT32 disk file, use `zig build uefi-image-x86_64`; that
-optional packaging step requires Python 3. `zig build test-uefi-image-x86_64`
+packaging step requires Python 3. `zig build test-uefi-image-x86_64`
 checks the disk format and boots the equivalent smoke disk image. See
 [image packaging](uefi-image.md).
 No command in these steps writes a physical disk or flashes motherboard firmware.

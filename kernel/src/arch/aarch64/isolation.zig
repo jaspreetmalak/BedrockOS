@@ -23,10 +23,15 @@ const supervisor_rx: u64 = af | inner_shareable | normal_wb | ap_readonly | uxn;
 const device_rw: u64 = af | pxn | uxn;
 const user_rx: u64 = af | inner_shareable | normal_wb | ap_user | ap_readonly | pxn | (1 << 11);
 const user_rw: u64 = af | inner_shareable | normal_wb | ap_user | pxn | uxn | (1 << 11);
+const user_ro: u64 = user_rx | uxn;
+
+fn userAttributes(mapping: contract.Mapping) u64 {
+    return if (mapping.executable) user_rx else if (mapping.writable) user_rw else user_ro;
+}
 const max_table_pages = 2048;
 const max_spaces = 8;
-// The fixed probe window needs a private L0, copied L1, user L2 and user L3.
-const max_private_tables = 4;
+// Core tasks need four private tables. Surface slots add owned L3 tables lazily.
+const max_private_tables = 32;
 const SpaceState = enum { vacant, building, live };
 const SpaceRecord = struct {
     state: SpaceState = .vacant,
@@ -35,6 +40,9 @@ const SpaceRecord = struct {
     tables: [max_private_tables]u64 = undefined,
     table_count: usize = 0,
     task: contract.TaskMemory = undefined,
+    table_limit: usize = max_private_tables,
+    shared: [contract.shared_surface_slots]contract.SharedMapping = @splat(.{}),
+    shared_tables: [contract.shared_surface_slots][2]u64 = @splat(@splat(0)),
 };
 const ContextRecord = struct {
     generation: u32 = 1,
@@ -162,6 +170,11 @@ pub fn prepare(info: *const protocol.BootInfo, layout: contract.KernelLayout) !v
     try protectRange(layout.text_start, layout.text_end, supervisor_rx);
     try protectRange(layout.rodata_start, layout.rodata_end, supervisor_ro);
     try protectRange(layout.data_start, layout.data_end, supervisor_rw);
+    if (info.apps.reservation.length != 0)
+        try protectRange(info.apps.reservation.base, try info.apps.reservation.endExclusive(), supervisor_ro);
+    for (info.drivers.records[0..info.drivers.count]) |driver|
+        for (driver.segments[0..driver.segment_count]) |segment|
+            try protectRange(segment.range.base, try segment.range.endExclusive(), if (segment.flags & 1 != 0) supervisor_rx else if (segment.flags & 2 != 0) supervisor_rw else supervisor_ro);
     try protectRange(layout.stack_bottom, layout.stack_top, supervisor_rw);
     try replacePage(kernel_root, layout.stack_guard, 0);
     try audit(kernel_root, false);
@@ -186,9 +199,11 @@ pub fn createWithTableLimit(frames: contract.TaskMemory, table_limit: usize) !co
     const record = vacantSpace() orelse return error.AddressSpaceCapacity;
     if (next_space_generation == 0) return error.AddressSpaceGenerationExhausted;
     try frames.validate();
-    for (frames.mappings()) |mapping| {
+    for (frames.allMappings()) |mapping| {
+        if (mapping.pages == 0) continue;
         const bytes = @as(u64, mapping.pages) * page;
         if (mapping.physical + bytes > physical_limit or !boot_info.isMapped(.{ .base = mapping.physical, .length = bytes })) return error.InvalidUserPhysicalFrame;
+        if (boot_info.apps.reservation.length != 0 and overlaps(mapping.physical, mapping.physical + bytes, boot_info.apps.reservation.base, try boot_info.apps.reservation.endExclusive())) return error.AppArchiveCannotBackUserMemory;
         for (0..mapping.pages) |offset| {
             const address = mapping.physical + offset * page;
             const alias = descriptor(kernel_root, address) orelse return error.UserFrameNotIdentityMapped;
@@ -198,6 +213,9 @@ pub fn createWithTableLimit(frames: contract.TaskMemory, table_limit: usize) !co
     }
     record.generation = next_space_generation;
     record.task = frames;
+    record.table_limit = @min(table_limit, max_private_tables);
+    record.shared = @splat(.{});
+    record.shared_tables = @splat(@splat(0));
     record.state = .building;
     errdefer rollbackSpace(record);
     const root = try newSpaceTable(record, table_limit);
@@ -216,17 +234,17 @@ pub fn createWithTableLimit(frames: contract.TaskMemory, table_limit: usize) !co
     const private_l3 = try newSpaceTable(record, table_limit);
     table(private_l1)[index(contract.user_base, 1)] = private_l2 | 3;
     table(private_l2)[index(contract.user_base, 2)] = private_l3 | 3;
-    for (frames.mappings()) |mapping| {
+    for (frames.allMappings()) |mapping| {
         for (0..mapping.pages) |offset| {
             table(private_l3)[index(mapping.virtual + offset * page, 3)] = mapping.physical + offset * page |
-                (if (mapping.writable) user_rw else user_rx) | 3;
+                userAttributes(mapping) | 3;
         }
     }
     try audit(root, true);
     try auditKernel(root);
     if (descriptor(root, frames.guard()) != null) return error.UserGuardMapped;
-    for (frames.mappings()) |mapping| {
-        for (0..mapping.pages) |offset| try expectLeaf(root, mapping.virtual + offset * page, mapping.physical + offset * page, if (mapping.writable) user_rw else user_rx);
+    for (frames.allMappings()) |mapping| {
+        for (0..mapping.pages) |offset| try expectLeaf(root, mapping.virtual + offset * page, mapping.physical + offset * page, userAttributes(mapping));
     }
     bedrock_arm_publish_code(frames.code, @as(u64, frames.code_pages) * page);
     bedrock_arm_refresh_tables();
@@ -235,11 +253,122 @@ pub fn createWithTableLimit(frames: contract.TaskMemory, table_limit: usize) !co
     return .{ .root = root, .generation = record.generation };
 }
 
+fn sharedReady() !void {
+    if (!prepared or active or active_context != null or bedrock_arm_current_ttbr() != kernel_root or
+        (preemption_ready and !timer.isQuiescent())) return error.ActiveAddressSpace;
+    checkKernelContinuation();
+}
+fn sharedBacking(physical: u64, pages: u16) !void {
+    try contract.validateSharedBacking(boot_info, physical, pages);
+    const allocator = memory.allocator() orelse return error.MemoryNotInitialized;
+    try contract.validateSharedAllocation(allocator, physical, pages);
+    const bytes = @as(u64, pages) * page;
+    if (physical + bytes > physical_limit) return error.InvalidSharedBacking;
+    for (table_pages[0..table_count]) |address|
+        if (contract.physicalOverlap(physical, bytes, address, page)) return error.ProtectedSharedBacking;
+    for (&spaces) |*candidate| {
+        if (candidate.state != .building and candidate.state != .live) continue;
+        for (candidate.tables[0..candidate.table_count]) |address|
+            if (contract.physicalOverlap(physical, bytes, address, page)) return error.ProtectedSharedBacking;
+        for (candidate.task.allMappings()) |mapping|
+            if (contract.physicalOverlap(physical, bytes, mapping.physical, @as(u64, mapping.pages) * page)) return error.ProtectedSharedBacking;
+    }
+    for (0..pages) |offset| {
+        const address = physical + offset * page;
+        const alias = descriptor(kernel_root, address) orelse return error.InvalidSharedBacking;
+        if (alias & (ap_user | ap_readonly) != 0 or alias & (pxn | uxn) != pxn | uxn or (alias >> 2) & 7 != 1)
+            return error.InvalidSharedPhysicalAlias;
+    }
+}
+fn auditShared(record: *const SpaceRecord) !void {
+    try audit(record.root, true);
+    try auditKernel(record.root);
+    for (record.shared, 0..) |item, slot| {
+        if (item.pages == 0) continue;
+        const mapping = try item.mapping(slot);
+        for (0..mapping.pages) |offset|
+            try expectLeaf(record.root, mapping.virtual + offset * page, mapping.physical + offset * page, userAttributes(mapping));
+    }
+}
+fn releaseSharedTable(record: *SpaceRecord, address: u64) !void {
+    const at = for (record.tables[0..record.table_count], 0..) |owned, offset| {
+        if (owned == address and offset >= 4) break offset;
+    } else return error.InvalidPrivateTableLedger;
+    try memory.allocator().?.release(address);
+    @import("std").mem.copyForwards(u64, record.tables[at .. record.table_count - 1], record.tables[at + 1 .. record.table_count]);
+    record.table_count -= 1;
+    record.tables[record.table_count] = 0;
+}
+
+pub fn mapShared(space: contract.AddressSpace, slot: usize, physical: u64, pages: u16, writable_mapping: bool) !void {
+    try sharedReady();
+    const item = try contract.SharedMapping.init(slot, physical, pages, writable_mapping);
+    const mapping = try item.mapping(slot);
+    const record = spaceRecord(space) orelse return error.InvalidAddressSpace;
+    if (record.shared[slot].pages != 0) return error.SharedSlotOccupied;
+    try sharedBacking(physical, pages);
+    try synchronizeKernelMappings(record);
+    const directory = table(record.tables[2]);
+    const first = index(mapping.virtual, 2);
+    const needed: usize = if (pages > 512) 2 else 1;
+    if (record.table_count + needed > record.table_limit) return error.PageTableCapacity;
+    for (0..needed) |offset| if (directory[first + offset] != 0) return error.SharedWindowAlreadyMapped;
+    const checkpoint = record.table_count;
+    var allocated: [2]u64 = @splat(0);
+    var published = false;
+    errdefer {
+        if (published) {
+            for (0..needed) |offset| directory[first + offset] = 0;
+            record.shared[slot] = .{};
+            record.shared_tables[slot] = @splat(0);
+        }
+        bedrock_arm_retire_tables();
+        while (record.table_count > checkpoint) {
+            record.table_count -= 1;
+            releaseTable(record.tables[record.table_count]);
+            record.tables[record.table_count] = 0;
+        }
+    }
+    for (0..needed) |offset| allocated[offset] = try newSpaceTable(record, record.table_limit);
+    for (0..pages) |offset|
+        table(allocated[offset / 512])[offset % 512] = physical + offset * page | userAttributes(mapping) | 3;
+    for (allocated[0..needed], 0..) |address, offset| directory[first + offset] = address | 3;
+    record.shared[slot] = item;
+    record.shared_tables[slot] = allocated;
+    published = true;
+    try auditShared(record);
+    bedrock_arm_refresh_tables();
+}
+
+pub fn unmapShared(space: contract.AddressSpace, slot: usize) !void {
+    try sharedReady();
+    if (slot >= contract.shared_surface_slots) return error.InvalidSharedMapping;
+    const record = spaceRecord(space) orelse return error.InvalidAddressSpace;
+    const item = record.shared[slot];
+    if (item.pages == 0) return error.SharedSlotEmpty;
+    const mapping = try item.mapping(slot);
+    try synchronizeKernelMappings(record);
+    try auditShared(record);
+    const directory = table(record.tables[2]);
+    const first = index(mapping.virtual, 2);
+    const needed: usize = if (item.pages > 512) 2 else 1;
+    const allocated = record.shared_tables[slot];
+    for (allocated[0..needed], 0..) |address, offset|
+        if (!ownsPrivateTable(record, address) or directory[first + offset] != address | 3) return error.InvalidPrivateTableLedger;
+    for (0..needed) |offset| directory[first + offset] = 0;
+    record.shared[slot] = .{};
+    record.shared_tables[slot] = @splat(0);
+    bedrock_arm_retire_tables();
+    for (allocated[0..needed]) |address| try releaseSharedTable(record, address);
+    try auditShared(record);
+}
+
 /// Destroy only inactive private tables. User frames belong to the core and
 /// may be returned only after this succeeds. Shared identity trees stay live.
 pub fn destroy(space: contract.AddressSpace) !void {
     if (!prepared) return error.IsolationNotReady;
     const record = spaceRecord(space) orelse return error.InvalidAddressSpace;
+    for (record.shared) |mapping| if (mapping.pages != 0) return error.AddressSpaceHasSharedMappings;
     if (active or active_context != null or bedrock_arm_current_ttbr() != kernel_root)
         return error.ActiveAddressSpace;
     checkKernelContinuation();
@@ -266,7 +395,7 @@ pub fn run(space: contract.AddressSpace, invocation: contract.Invocation) void {
     if (!prepared or active or invocation.entry != contract.user_code or
         invocation.user_sp != contract.user_stack_top) @panic("invalid ARM user invocation");
     const owned = spaceRecord(space) orelse @panic("unknown or stale ARM task root");
-    if (owned.task.desktop) @panic("cooperative ARM fixture needs fixture layout");
+    if (owned.task.desktop or owned.task.app) @panic("cooperative ARM fixture needs fixture layout");
     active_task = owned.task;
     checkKernelContinuation();
     active = true;
@@ -457,6 +586,7 @@ fn validateInterruptDevice(info: *const protocol.BootInfo, range: protocol.Physi
         overlaps(range.base, end, contract.user_base, contract.user_window_end) or
         overlaps(range.base, end, info.kernel_reserved.base, try info.kernel_reserved.endExclusive()) or
         overlaps(range.base, end, info.loader_reserved.base, try info.loader_reserved.endExclusive()) or
+        (info.apps.reservation.length != 0 and overlaps(range.base, end, info.apps.reservation.base, try info.apps.reservation.endExclusive())) or
         (info.framebuffer.size != 0 and overlaps(range.base, end, info.framebuffer.base, info.framebuffer.base + info.framebuffer.size)) or
         (info.console.kind == @backingInt(protocol.ConsoleKind.pl011) and overlaps(range.base, end, info.console.base, info.console.base + 0x48)))
         return error.InterruptDeviceOverlapsOwnedMemory;
@@ -507,8 +637,9 @@ fn savedUserFrameValid(frame: *const TrapFrame, task: contract.TaskMemory, pc: u
 comptime {
     if (@sizeOf(TrapFrame) != 784 or @offsetOf(TrapFrame, "spsr") != 248 or
         @offsetOf(TrapFrame, "fpcr") != 768) @compileError("ARM exception frame changed");
-    if (contract.user_base / block != (contract.user_window_end - 1) / block)
-        @compileError("The fixed ARM user window requires one private L3 table");
+    if (contract.user_base / block != (contract.core_user_window_end - 1) / block or
+        contract.user_base >> 30 != (contract.user_window_end - 1) >> 30)
+        @compileError("ARM core must fit one L3 and all user windows must fit one private L2");
 }
 
 export fn bedrock_arm_user_exception(frame: *TrapFrame, esr: u64, elr: u64, far: u64, slot: u64) callconv(.c) u64 {
@@ -619,7 +750,7 @@ fn isPermanentTable(address: u64) bool {
     return false;
 }
 fn newSpaceTable(record: *SpaceRecord, table_limit: usize) !u64 {
-    if (record.state != .building) return error.InvalidPrivateTableLedger;
+    if (record.state != .building and record.state != .live) return error.InvalidPrivateTableLedger;
     if (record.table_count >= @min(table_limit, max_private_tables))
         return error.PageTableCapacity;
     const address = try memory.allocateZeroed();
@@ -674,7 +805,7 @@ fn rollbackSpace(record: *SpaceRecord) void {
     record.state = .vacant;
 }
 fn synchronizeKernelMappings(record: *SpaceRecord) !void {
-    if (record.state != .live or record.table_count != max_private_tables or
+    if (record.state != .live or record.table_count < 4 or record.table_count > max_private_tables or
         record.root != record.tables[0]) return error.InvalidPrivateTableLedger;
     const l0_slot = index(contract.user_base, 0);
     const l1_slot = index(contract.user_base, 1);
@@ -687,6 +818,19 @@ fn synchronizeKernelMappings(record: *SpaceRecord) !void {
         table(record.tables[1])[l1_slot] != (record.tables[2] | 3) or
         table(record.tables[2])[l2_slot] != (record.tables[3] | 3))
         return error.InvalidPrivateTableLedger;
+    var expected_count: usize = 4;
+    for (record.shared, 0..) |mapping, slot| {
+        const needed: usize = if (mapping.pages == 0) 0 else if (mapping.pages > 512) 2 else 1;
+        const first = index(contract.shared_surface_base + slot * contract.shared_surface_stride, 2);
+        for (0..2) |part| {
+            const address = record.shared_tables[slot][part];
+            if (part < needed) {
+                if (address == 0 or !ownsPrivateTable(record, address) or table(record.tables[2])[first + part] != address | 3) return error.InvalidPrivateTableLedger;
+            } else if (address != 0 or table(record.tables[2])[first + part] != 0) return error.InvalidPrivateTableLedger;
+        }
+        expected_count += needed;
+    }
+    if (record.table_count != expected_count) return error.InvalidPrivateTableLedger;
     @memcpy(table(record.root), table(kernel_root));
     table(record.root)[l0_slot] = record.tables[1] | 3;
     @memcpy(table(record.tables[1]), table(permanent & address_mask));
@@ -749,6 +893,10 @@ fn mapDevice(info: *const protocol.BootInfo, base: u64, length: u64, attributes:
         overlaps(first, last, info.kernel_reserved.base, try info.kernel_reserved.endExclusive()) or
         overlaps(first, last, info.loader_reserved.base, try info.loader_reserved.endExclusive()))
         return error.DeviceOverlapsOwnedArena;
+    if (info.wifi.reservation.length != 0 and overlaps(first, last, info.wifi.reservation.base, try info.wifi.reservation.endExclusive())) return error.DeviceOverlapsOwnedArena;
+    if (info.apps.reservation.length != 0 and overlaps(first, last, info.apps.reservation.base, try info.apps.reservation.endExclusive())) return error.DeviceOverlapsOwnedArena;
+    for (info.drivers.records[0..info.drivers.count]) |driver|
+        if (overlaps(first, last, driver.reservation.base, try driver.reservation.endExclusive())) return error.DeviceOverlapsOwnedArena;
     // Only page-rounded referred MMIO is introduced beyond RAM descriptors.
     var at = first;
     while (at < last) : (at += page) try replacePage(kernel_root, at, at | attributes | 3);
@@ -772,6 +920,7 @@ fn descriptor(root: u64, address: u64) ?u64 {
     return null;
 }
 fn validateLayout(info: *const protocol.BootInfo, layout: contract.KernelLayout) !void {
+    try contract.validateKernelStack(layout);
     if (layout.kernel_start != info.kernel_image.base or layout.kernel_start < info.kernel_reserved.base)
         return error.KernelStartMismatch;
     if (layout.text_start != layout.kernel_start or layout.text_start >= layout.text_end) return error.InvalidTextLayout;
@@ -790,6 +939,17 @@ fn expectLeaf(root: u64, virtual: u64, physical: u64, attributes: u64) !void {
 }
 fn auditKernel(root: u64) !void {
     const layout = kernel_layout;
+    if (boot_info.apps.reservation.length != 0) {
+        var at = boot_info.apps.reservation.base;
+        const end = try boot_info.apps.reservation.endExclusive();
+        while (at < end) : (at += page) try expectLeaf(root, at, at, supervisor_ro);
+    }
+    for (boot_info.drivers.records[0..boot_info.drivers.count]) |driver|
+        for (driver.segments[0..driver.segment_count]) |segment| {
+            var at = segment.range.base;
+            while (at < try segment.range.endExclusive()) : (at += page)
+                try expectLeaf(root, at, at, if (segment.flags & 1 != 0) supervisor_rx else if (segment.flags & 2 != 0) supervisor_rw else supervisor_ro);
+        };
     for ([_]struct { begin: u64, end: u64, attributes: u64 }{
         .{ .begin = layout.text_start, .end = layout.text_end, .attributes = supervisor_rx },
         .{ .begin = layout.rodata_start, .end = layout.rodata_end, .attributes = supervisor_ro },
@@ -841,17 +1001,21 @@ fn auditNode(node: u64, level: u2, base: u64, owner: ?*const SpaceRecord) !void 
         if (entry & ap_user != 0) {
             const record = owner orelse return error.UnexpectedUserMapping;
             if (level != 3) return error.UnexpectedUserMapping;
-            const mapping = for (record.task.mappings()) |range| {
-                if (virtual >= range.virtual and virtual - range.virtual < @as(u64, range.pages) * page) break range;
-            } else return error.UnexpectedUserMapping;
+            const mapping = contract.userMapping(record.task, &record.shared, virtual) orelse return error.UnexpectedUserMapping;
             const physical = mapping.physical + virtual - mapping.virtual;
-            const attributes = if (mapping.writable) user_rw else user_rx;
+            const attributes = userAttributes(mapping);
             if (entry & address_mask != physical or entry & ~address_mask != attributes | 3) return error.InvalidUserMapping;
             if (entry & pxn == 0 or (entry & ap_readonly == 0 and entry & uxn == 0)) return error.UserWritableExecutableMapping;
         } else {
             if (entry & address_mask != virtual or entry & uxn == 0) return error.InvalidSupervisorMapping;
-            if (entry & pxn == 0 and (entry & ap_readonly == 0 or virtual < kernel_layout.text_start or
-                virtual >= kernel_layout.text_end)) return error.SupervisorWritableExecutableMapping;
+            const approved_code = (virtual >= kernel_layout.text_start and virtual < kernel_layout.text_end) or driverExecutable(virtual);
+            if (entry & pxn == 0 and (entry & ap_readonly == 0 or !approved_code)) return error.SupervisorWritableExecutableMapping;
         }
     }
+}
+fn driverExecutable(address: u64) bool {
+    for (boot_info.drivers.records[0..boot_info.drivers.count]) |driver|
+        for (driver.segments[0..driver.segment_count]) |segment|
+            if (segment.flags & 1 != 0 and address >= segment.range.base and address - segment.range.base < segment.range.length) return true;
+    return false;
 }

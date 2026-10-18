@@ -22,8 +22,9 @@ const Mock = struct {
     fn listing(context: *anyopaque, path: []const u8, cursor: *usize) anyerror!?files.Entry {
         const self = from(context);
         if (std.mem.eql(u8, path, "/container")) {
-            if (cursor.* >= 2) return null;
-            const name: []const u8 = if (cursor.* == 0) "Documents" else "Downloads";
+            const names = [_][]const u8{ "Documents", "Downloads", "Desktop" };
+            if (cursor.* >= names.len) return null;
+            const name = names[cursor.*];
             cursor.* += 1;
             return try files.Entry.init(name, .directory, 0, false);
         }
@@ -46,6 +47,7 @@ const Mock = struct {
             return null;
         }
         if (std.mem.eql(u8, path, "/container/Right/Dest") or std.mem.eql(u8, path, "/container/Left/Folder") or std.mem.eql(u8, path, "/container/Documents/Folder") or std.mem.eql(u8, path, "/container/Downloads/Dest")) return null;
+        if (std.mem.eql(u8, path, "/container/Desktop")) return null;
         return error.PermissionDenied;
     }
     fn record(self: *Mock, source: []const u8, destination: []const u8) void {
@@ -292,7 +294,8 @@ test "compact native Files at minimum and reference sizes preserves guards and s
         for (0..size.height) |row| for (size.width..stride) |column| try std.testing.expectEqual(@as(u32, 0x12345678), pixels[1 + row * stride + column]);
         const geometry = try files.Geometry.init(size.width, size.height);
         const rect = geometry.list(0);
-        try std.testing.expectEqual(surface.encode(files.colors.selected), pixels[1 + @as(usize, @intCast(rect.y + 1)) * stride + @as(usize, @intCast(rect.x + 1))]);
+        try std.testing.expectEqual(surface.encode(files.colors.selected), pixels[1 + @as(usize, @intCast(rect.y + 1)) * stride + @as(usize, @intCast(rect.x + 24))]);
+        try std.testing.expect(pixels[1 + @as(usize, @intCast(rect.y + 1)) * stride + @as(usize, @intCast(rect.x + 1))] != surface.encode(files.colors.selected));
         try std.testing.expect(pixels[1 + (@as(usize, size.height) - 20) * stride + 20] != 0x12345678);
     }
 }
@@ -389,6 +392,7 @@ test "Files material commands match frozen-backdrop pixels and repeated renderin
         pixels: []u32,
         backdrop: *const ui.Backdrop,
         material_calls: usize = 0,
+        material_edge_calls: usize = 0,
         calls: usize = 0,
         invalid: bool = false,
         fn fill(context: *anyopaque, x: u32, y: u32, width: u32, height: u32, value: u32) void {
@@ -413,6 +417,26 @@ test "Files material commands match frozen-backdrop pixels and repeated renderin
                 self.pixels[row * 800 + column] = expectedMaterial(self.backdrop.sample(@as(i64, @intCast(column)) + 16, @as(i64, @intCast(row)) + 16), value);
             };
         }
+        fn blend(context: *anyopaque, x: u32, y: u32, pixel: u32, coverage: u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (x >= 800 or y >= 600) {
+                self.invalid = true;
+                return;
+            }
+            var target = ui.Surface.init(self.pixels, 800, 600, 800, .{ .red = 0xff0000, .green = 0xff00, .blue = 0xff }) catch unreachable;
+            target.blendPixel(x, y, ui.Color.rgb(@intCast(pixel >> 16 & 255), @intCast(pixel >> 8 & 255), @intCast(pixel & 255)), coverage);
+        }
+        fn materialPixel(context: *anyopaque, x: u32, y: u32, value: ui.Material, coverage: u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (x >= 800 or y >= 600 or coverage == 0 or coverage == 255) {
+                self.invalid = true;
+                return;
+            }
+            self.material_edge_calls += 1;
+            var target = ui.Surface.init(self.pixels, 800, 600, 800, .{ .red = 0xff0000, .green = 0xff00, .blue = 0xff }) catch unreachable;
+            target.setBackdrop(self.backdrop, .{ .x = 16, .y = 16 }) catch unreachable;
+            target.materialPixel(x, y, value, coverage);
+        }
     };
     var frost = try FrostFixture.init();
     defer frost.deinit();
@@ -430,7 +454,7 @@ test "Files material commands match frozen-backdrop pixels and repeated renderin
     model.panes[0].selected = 0;
     var native = try ui.Surface.init(direct, 800, 600, 800, .{ .red = 0xff0000, .green = 0xff00, .blue = 0xff });
     try native.setBackdrop(&frost.backdrop, .{ .x = 16, .y = 16 });
-    var commands = try ui.Surface.initCommands(800, 600, .{ .context = &receiver, .fillRect = Sink.fill, .materialRect = Sink.material });
+    var commands = try ui.Surface.initCommands(800, 600, .{ .context = &receiver, .fillRect = Sink.fill, .materialRect = Sink.material, .materialPixel = Sink.materialPixel, .blendPixel = Sink.blend });
     try files.renderWithWorkspace(&native, &workspace, &model);
     try files.renderWithWorkspace(&commands, &workspace, &model);
     try std.testing.expectEqualSlices(u32, direct, submitted);
@@ -456,12 +480,27 @@ test "Files material commands match frozen-backdrop pixels and repeated renderin
         try files.renderWithWorkspace(&native, &workspace, &model);
         try files.renderWithWorkspace(&commands, &workspace, &model);
         try std.testing.expectEqualSlices(u32, direct, submitted);
-        try std.testing.expect(!receiver.invalid);
+        try std.testing.expect(!receiver.invalid and receiver.material_edge_calls != 0);
         const menu_hash = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(direct));
         @memset(direct, 0);
         try files.renderWithWorkspace(&native, &workspace, &model);
         try std.testing.expectEqual(menu_hash, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(direct)));
     }
+    model.menu = null;
+    model.path_editing = true;
+    model.path_editor.set("~/Documents", true);
+    const path = windowPath(800);
+    try files.renderWindowWithWorkspace(&native, &workspace, &model, path);
+    try files.renderWindowWithWorkspace(&commands, &workspace, &model, path);
+    try std.testing.expectEqualSlices(u32, direct, submitted);
+    const window_hash = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(direct));
+    native.fillRect(@intCast(path.x), @intCast(path.y), path.width, path.height, 0xff0000);
+    commands.fillRect(@intCast(path.x), @intCast(path.y), path.width, path.height, 0x00ff00);
+    try files.renderWindowWithWorkspace(&native, &workspace, &model, path);
+    try files.renderWindowWithWorkspace(&commands, &workspace, &model, path);
+    try std.testing.expectEqualSlices(u32, direct, submitted);
+    try std.testing.expectEqual(window_hash, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(direct)));
+    try std.testing.expect(!receiver.invalid and receiver.material_edge_calls != 0);
 }
 test "frosted Files keeps solid selection text and errors readable with guarded pixel storage" {
     var frost = try FrostFixture.init();
@@ -480,17 +519,20 @@ test "frosted Files keeps solid selection text and errors readable with guarded 
     model.panes[0].selected = 0;
     try files.renderWithWorkspace(&surface, &workspace, &model);
     const rect = (try files.Geometry.init(640, 360)).row(0, 0);
-    try std.testing.expectEqual(surface.encode(files.colors.selected), pixels[1 + @as(usize, @intCast(rect.y + 1)) * stride + @as(usize, @intCast(rect.x + 1))]);
+    try std.testing.expectEqual(surface.encode(files.colors.selected), pixels[1 + @as(usize, @intCast(rect.y + 1)) * stride + @as(usize, @intCast(rect.x + 24))]);
+    try std.testing.expect(pixels[1 + @as(usize, @intCast(rect.y + 1)) * stride + @as(usize, @intCast(rect.x + 1))] != surface.encode(files.colors.selected));
     var ink: usize = 0;
     for (@as(usize, @intCast(rect.y))..@as(usize, @intCast(rect.y + 28))) |y| for (@as(usize, @intCast(rect.x + 24))..@as(usize, @intCast(rect.x + 160))) |x| {
-        if (pixels[1 + y * stride + x] == surface.encode(files.colors.text)) ink += 1;
+        const color = surface.decode(pixels[1 + y * stride + x]);
+        if (color.r >= 170 and color.g >= 170 and color.b >= 180) ink += 1;
     };
     try std.testing.expect(ink > 30);
     model.action(.paste); // An actual failed control action shows a solid error.
     try files.renderWithWorkspace(&surface, &workspace, &model);
     var error_ink: usize = 0;
     for (height - 24..height) |y| for (0..640) |x| {
-        if (pixels[1 + y * stride + x] == surface.encode(files.colors.error_color)) error_ink += 1;
+        const color = surface.decode(pixels[1 + y * stride + x]);
+        if (color.r >= 170 and color.g >= 90 and color.b >= 80 and color.r > @as(u16, color.g) + 50) error_ink += 1;
     };
     try std.testing.expect(error_ink > 30);
     try std.testing.expectEqual(@as(u32, 0x12345678), pixels[0]);
@@ -504,6 +546,140 @@ fn click(model: *files.Model, rect: ui.Rect) !void {
     try send(model, .pointer_down, 1, x, y, 0);
     try send(model, .pointer_up, 1, x, y, 0);
 }
+
+test "Desktop shortcut stays visible at the minimum viewport and preserves existing shortcut values" {
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(files.Shortcut.home));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(files.Shortcut.documents));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(files.Shortcut.downloads));
+    try std.testing.expectEqualStrings("/container/Desktop", files.layout.shortcutPath(.desktop));
+    for ([_][2]u32{ .{ 316, 204 }, .{ 320, 208 }, .{ 800, 600 } }) |size| {
+        const geometry = try files.Geometry.init(size[0], size[1]);
+        var previous_bottom: i32 = 0;
+        for ([_]files.Shortcut{ .home, .documents, .downloads, .desktop }) |shortcut| {
+            const rect = geometry.sidebar(shortcut);
+            try std.testing.expect(rect.height >= 22);
+            try std.testing.expect(rect.y >= previous_bottom);
+            previous_bottom = rect.y + @as(i32, @intCast(rect.height));
+            try std.testing.expect(previous_bottom <= size[1] - files.layout.footer_height - 8);
+            try std.testing.expectEqual(shortcut, geometry.shortcutAt(.{ .x = rect.x + 4, .y = rect.y + 4 }).?);
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 32), (try files.Geometry.init(800, 600)).sidebar(.desktop).height);
+}
+
+test "minimum Files window paints the complete Desktop label including its descender" {
+    const Ink = struct {
+        fn bounds(pixels: []const u32, stride: usize, region: ui.Rect, background: u32) !ui.Rect {
+            var left = region.x + @as(i32, @intCast(region.width));
+            var top = region.y + @as(i32, @intCast(region.height));
+            var right = region.x;
+            var bottom = region.y;
+            for (@as(usize, @intCast(region.y))..@as(usize, @intCast(region.y)) + region.height) |y| {
+                for (@as(usize, @intCast(region.x))..@as(usize, @intCast(region.x)) + region.width) |x| {
+                    if (pixels[y * stride + x] == background) continue;
+                    left = @min(left, @as(i32, @intCast(x)));
+                    top = @min(top, @as(i32, @intCast(y)));
+                    right = @max(right, @as(i32, @intCast(x + 1)));
+                    bottom = @max(bottom, @as(i32, @intCast(y + 1)));
+                }
+            }
+            try std.testing.expect(right > left and bottom > top);
+            return .{ .x = left, .y = top, .width = @intCast(right - left), .height = @intCast(bottom - top) };
+        }
+    };
+    const width = files.layout.minimum_width;
+    inline for ([_]u32{ files.layout.minimum_height, 360 }) |body_height| {
+        const height = body_height + files.layout.window_header_height;
+        var mock: Mock = .{};
+        var model: files.Model = .{};
+        var workspace: files.Workspace = undefined;
+        try model.init(mock.provider(), "/container/Documents", "/container/Downloads");
+        var pixels: [width * height]u32 = @splat(0);
+        var surface = try ui.Surface.init(&pixels, width, height, width, .{ .red = 0xff0000, .green = 0xff00, .blue = 0xff });
+        try files.renderWindowWithWorkspace(&surface, &workspace, &model, windowPath(width));
+        var row = (try files.Geometry.init(width, body_height)).sidebar(.desktop);
+        try std.testing.expectEqual(@as(u32, if (body_height == files.layout.minimum_height) 22 else 32), row.height);
+        row.y += files.layout.window_header_height;
+        // Exclude the folder icon; the remaining row contains only Desktop's ink.
+        row.x += 24;
+        row.width -= 24;
+        const background = surface.encode(files.colors.sidebar);
+        const actual = try Ink.bounds(&pixels, width, row, background);
+
+        // Use the font painter as an unclipped reference, independent of the app's
+        // declarative tree, row padding and ancestor clips. Compare every gray edge,
+        // so a missing bottom row of the final 'p' cannot pass an ink-count check.
+        var reference_pixels: [132 * ui.font.line_height]u32 = @splat(background);
+        var reference = try ui.Surface.init(&reference_pixels, 132, ui.font.line_height, 132, surface.masks);
+        try ui.font.paint(&reference, "Desktop", 0, 0, files.colors.text, 1);
+        const expected = try Ink.bounds(&reference_pixels, 132, .{ .x = 0, .y = 0, .width = 132, .height = ui.font.line_height }, background);
+        try std.testing.expectEqual(expected.width, actual.width);
+        try std.testing.expectEqual(expected.height, actual.height);
+        try std.testing.expectEqual((try ui.font.controlOriginY(row.y, row.height, 1)) + expected.y, actual.y);
+        for (0..expected.height) |y| for (0..expected.width) |x| {
+            const reference_at = (@as(usize, @intCast(expected.y)) + y) * 132 + @as(usize, @intCast(expected.x)) + x;
+            const actual_at = (@as(usize, @intCast(actual.y)) + y) * width + @as(usize, @intCast(actual.x)) + x;
+            try std.testing.expectEqual(reference_pixels[reference_at], pixels[actual_at]);
+        };
+    }
+}
+
+test "Desktop navigation and drag drop use the checked private container path" {
+    var mock: Mock = .{};
+    var model: files.Model = .{};
+    try model.init(mock.provider(), "/container/Documents", "/container/Downloads");
+    const geometry = try files.Geometry.init(800, 600);
+    try click(&model, geometry.sidebar(.desktop));
+    try std.testing.expectEqualStrings("/container/Desktop", model.panes[0].directory());
+    try std.testing.expectEqualStrings("~/Desktop", model.headerPath());
+    try std.testing.expectEqual(@as(usize, 0), model.panes[0].count);
+    try click(&model, geometry.button(.back));
+    try std.testing.expectEqualStrings("/container/Documents", model.panes[0].directory());
+    const source = geometry.row(0, 0);
+    const target = geometry.sidebar(.desktop);
+    try send(&model, .pointer_down, 1, @intCast(source.x + 12), @intCast(source.y + 10), 0);
+    try send(&model, .pointer_move, 0, @intCast(target.x + 12), @intCast(target.y + 10), 0);
+    try std.testing.expectEqual(@as(usize, 0), mock.moves);
+    try send(&model, .pointer_up, 1, @intCast(target.x + 12), @intCast(target.y + 10), 0);
+    try std.testing.expectEqualStrings("/container/Documents/note.txt", mock.last_source[0..mock.source_len]);
+    try std.testing.expectEqualStrings("/container/Desktop/note.txt", mock.last_destination[0..mock.destination_len]);
+    try std.testing.expectEqual(@as(usize, 1), mock.moves);
+    try send(&model, .pointer_up, 1, @intCast(target.x + 12), @intCast(target.y + 10), 0);
+    try std.testing.expectEqual(@as(usize, 1), mock.moves);
+}
+
+test "Desktop upgrade adds only its private folder and tolerates existing or unavailable storage" {
+    const Storage = struct {
+        attempts: usize = 0,
+        created: bool = false,
+        failure: ?anyerror = null,
+        fn list(_: *anyopaque, _: []const u8, _: *usize) anyerror!?files.Entry {
+            return null;
+        }
+        fn mkdir(context: *anyopaque, path: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try std.testing.expectEqualStrings("/container/Desktop", path);
+            self.attempts += 1;
+            if (self.failure) |err| return err;
+            if (self.created) return error.AlreadyExists;
+            self.created = true;
+        }
+    };
+    var storage: Storage = .{};
+    const provider: files.Provider = .{ .context = &storage, .list = Storage.list, .mkdir = Storage.mkdir };
+    files.Model.ensureDesktop(provider);
+    try std.testing.expect(storage.created);
+    files.Model.ensureDesktop(provider);
+    try std.testing.expectEqual(@as(usize, 2), storage.attempts);
+    for ([_]anyerror{ error.AlreadyExists, error.ReadOnly, error.Capacity, error.PermissionDenied }) |failure| {
+        storage.failure = failure;
+        files.Model.ensureDesktop(provider);
+    }
+    try std.testing.expectEqual(@as(usize, 6), storage.attempts);
+    files.Model.ensureDesktop(.{ .context = &storage, .list = Storage.list });
+    try std.testing.expectEqual(@as(usize, 6), storage.attempts);
+}
+
 fn contextRow(model: *files.Model, visible_row: usize) !void {
     const row = (try files.Geometry.initMode(800, 600, model.split)).row(model.focus, visible_row);
     try send(model, .pointer_down, @backingInt(ui.input.Button.right), @intCast(row.x + 32), @intCast(row.y + 10), 0);
@@ -980,4 +1156,394 @@ test "minimum viewport popup material and sharp destructive label stay inside gu
     try std.testing.expectEqual(@as(u32, 0x12345678), pixels[0]);
     try std.testing.expectEqual(@as(u32, 0x12345678), pixels[pixels.len - 1]);
     for (0..360) |row| for (640..stride) |column| try std.testing.expectEqual(@as(u32, 0x12345678), pixels[1 + row * stride + column]);
+}
+
+test "responsive Files paints minimum and tiled clients with aligned toolbar hits" {
+    const sentinel: u32 = 0x12345678;
+    const Size = struct { width: u32, height: u32 };
+    for ([_]Size{ .{ .width = 316, .height = 204 }, .{ .width = 396, .height = 510 }, .{ .width = 636, .height = 710 } }) |size| {
+        var mock: Mock = .{};
+        var model: files.Model = .{};
+        var workspace: files.Workspace = undefined;
+        try model.init(mock.provider(), "/container/Documents", "/container/Downloads");
+        try model.dispatch(.{ .kind = .redraw, .code = 1 }, size.width, size.height);
+        model.panes[0].selected = 0;
+        const geometry = try files.Geometry.init(size.width, size.height);
+        try std.testing.expect(!geometry.canSplit() and geometry.visible_rows >= 4);
+        const stride = size.width + 5;
+        const count = @as(usize, stride) * size.height;
+        const pixels = try std.testing.allocator.alloc(u32, count + 2);
+        defer std.testing.allocator.free(pixels);
+        @memset(pixels, sentinel);
+        var surface = try ui.Surface.init(pixels[1 .. count + 1], size.width, size.height, stride, .{ .red = 0xff0000, .green = 0xff00, .blue = 0xff });
+        model.hovered_action = .more;
+        try files.renderWithWorkspace(&surface, &workspace, &model);
+        const more = geometry.button(.more);
+        try std.testing.expectEqual(files.Action.more, geometry.actionAt(.{ .x = more.x + 2, .y = more.y + 16 }).?);
+        try std.testing.expectEqual(surface.encode(files.colors.hover), pixels[1 + @as(usize, @intCast(more.y + 16)) * stride + @as(usize, @intCast(more.x + 2))]);
+        const row = geometry.row(0, 0);
+        try std.testing.expectEqual(surface.encode(files.colors.selected), pixels[1 + @as(usize, @intCast(row.y + 1)) * stride + @as(usize, @intCast(row.x + 24))]);
+        try std.testing.expect(pixels[1 + @as(usize, @intCast(row.y + 1)) * stride + @as(usize, @intCast(row.x + 1))] != surface.encode(files.colors.selected));
+        model.action(.rename);
+        model.pressed_edit = .confirm;
+        try files.renderWithWorkspace(&surface, &workspace, &model);
+        const confirm = geometry.confirm();
+        try std.testing.expectEqual(surface.encode(files.colors.selected), pixels[1 + @as(usize, @intCast(confirm.y + 16)) * stride + @as(usize, @intCast(confirm.x + 2))]);
+        model.edit = .none;
+        model.preview_open = true;
+        model.preview_name_len = 8;
+        @memcpy(model.preview_name[0..8], "note.txt");
+        model.preview_len = 48;
+        @memset(model.preview[0..48], 'A');
+        try files.renderWithWorkspace(&surface, &workspace, &model);
+        model.preview_open = false;
+        inline for (.{ files.MenuKind.file, files.MenuKind.directory, files.MenuKind.background, files.MenuKind.more }) |kind| {
+            model.menu = .{ .kind = kind, .anchor = .{ .x = @intCast(size.width), .y = @intCast(size.height) } };
+            try files.renderWithWorkspace(&surface, &workspace, &model);
+            const bounds = try files.MenuGeometry.init(size.width, size.height, kind, model.menu.?.anchor);
+            try std.testing.expect(bounds.rect.y >= 0 and bounds.rect.y + @as(i32, @intCast(bounds.rect.height)) <= size.height);
+            for (files.menuActions(kind), 0..) |_, i| {
+                const item = bounds.item(i);
+                try std.testing.expect(item.height >= 18);
+                try std.testing.expectEqual(i, bounds.itemAt(.{ .x = item.x + 8, .y = item.y + @as(i32, @intCast(item.height / 2)) }).?);
+                var ink: usize = 0;
+                for (@as(usize, @intCast(item.y))..@as(usize, @intCast(item.y + @as(i32, @intCast(item.height))))) |y| {
+                    for (@as(usize, @intCast(item.x))..@as(usize, @intCast(item.x + @as(i32, @intCast(item.width))))) |x| {
+                        const pixel = pixels[1 + y * stride + x];
+                        if (pixel == surface.encode(files.colors.text) or pixel == surface.encode(files.colors.muted) or pixel == surface.encode(files.colors.error_color)) ink += 1;
+                    }
+                }
+                try std.testing.expect(ink > 8);
+            }
+        }
+        try std.testing.expectEqual(sentinel, pixels[0]);
+        try std.testing.expectEqual(sentinel, pixels[count + 1]);
+        for (0..size.height) |y| for (size.width..stride) |x| try std.testing.expectEqual(sentinel, pixels[1 + y * stride + x]);
+    }
+    try std.testing.expectError(error.InvalidViewport, files.Geometry.init(315, 204));
+    try std.testing.expectError(error.InvalidViewport, files.Geometry.init(316, 203));
+}
+
+test "shrinking split Files preserves its focused location and editing target" {
+    var mock: Mock = .{};
+    var model: files.Model = .{};
+    try model.init(mock.provider(), "/container/Documents", "/container/Downloads");
+    model.action(.split);
+    model.focus = 1;
+    model.panes[1].selected = 0;
+    model.action(.rename);
+    try model.dispatch(.{ .kind = .redraw, .code = 1 }, 316, 204);
+    try std.testing.expect(!model.split and !model.split_allowed and model.focus == 0);
+    try std.testing.expectEqualStrings("/container/Downloads", model.panes[0].directory());
+    try std.testing.expectEqualStrings("/container/Documents", model.panes[1].directory());
+    try std.testing.expectEqualStrings("/container/Downloads", model.histories[0].locations[model.histories[0].position].bytes[0..model.histories[0].locations[model.histories[0].position].len]);
+    try std.testing.expect(model.edit == .rename and std.mem.eql(u8, model.editText(), "Dest"));
+    try std.testing.expect(!model.menuEnabled(.split));
+    const geometry = try files.Geometry.initMode(316, 204, true);
+    try std.testing.expect(!geometry.split and geometry.pane(1).width == 0 and geometry.button(.split).width == 0);
+    model.edit = .none;
+    model.action(.split);
+    try std.testing.expect(!model.split);
+    try model.dispatch(.{ .kind = .redraw, .code = 1 }, 640, 360);
+    try std.testing.expect(model.menuEnabled(.split));
+    model.action(.split);
+    try std.testing.expect(model.split);
+}
+
+test "minimum Files redraw reveals selection and compressed More actions dispatch safely" {
+    var context: Flood = .{};
+    var model: files.Model = .{};
+    try model.init(.{ .context = &context, .list = Flood.list }, "/left", "/right");
+    model.panes[0].selected = 8;
+    try model.dispatch(.{ .kind = .redraw, .code = 1 }, 316, 204);
+    try std.testing.expectEqual(@as(usize, 5), model.panes[0].scroll);
+    const geometry = try files.Geometry.init(316, 204);
+    const more = geometry.button(.more);
+    const point: ui.Point = .{ .x = more.x + 10, .y = more.y + 10 };
+    try model.dispatch(.{ .kind = .pointer_down, .code = 1, .x = @intCast(point.x), .y = @intCast(point.y) }, 316, 204);
+    try model.dispatch(.{ .kind = .pointer_up, .code = 1, .x = @intCast(point.x), .y = @intCast(point.y) }, 316, 204);
+    try std.testing.expect(model.menu != null and model.menu.?.kind == .more);
+    const bounds = try files.MenuGeometry.init(316, 204, .more, model.menu.?.anchor);
+    try std.testing.expectEqual(@as(u32, 19), bounds.row_height);
+    const rect = bounds.item(bounds.actionIndex(.refresh).?);
+    const revision = model.revision;
+    try model.dispatch(.{ .kind = .pointer_down, .code = 1, .x = @intCast(rect.x + 10), .y = @intCast(rect.y + 9) }, 316, 204);
+    try model.dispatch(.{ .kind = .pointer_up, .code = 1, .x = @intCast(rect.x + 10), .y = @intCast(rect.y + 9) }, 316, 204);
+    try std.testing.expect(model.menu == null and model.revision > revision and model.initialized);
+}
+
+fn windowPath(width: u32) ui.Rect {
+    return .{ .x = 104, .y = 4, .width = width - 204, .height = 24 };
+}
+fn windowSend(model: *files.Model, event: ui.Event, width: u32, height: u32) !void {
+    try model.dispatchWindow(event, width, height, windowPath(width));
+}
+fn enterLocation(model: *files.Model, path: []const u8) !void {
+    try windowSend(model, .{ .kind = .key_down, .code = 'l', .modifiers = ui.input.modifiers.control }, 800, 632);
+    for (path) |byte| try windowSend(model, .{ .kind = .text, .code = byte }, 800, 632);
+    try windowSend(model, .{ .kind = .key_down, .code = @backingInt(ui.input.Key.enter) }, 800, 632);
+}
+
+test "location editor selections delete replace and preserve bounds at capacity" {
+    const Editor = @import("path_editor.zig").Editor;
+    var editor: Editor = .{};
+    editor.set("/container/Documents", true);
+    try editor.insert('/');
+    try std.testing.expectEqualStrings("/", editor.text());
+    editor.set("/container/Documents", false);
+    editor.move(0, false);
+    editor.right(true);
+    try std.testing.expectEqual(@as(usize, 1), editor.selection().end);
+    editor.delete();
+    try std.testing.expectEqualStrings("container/Documents", editor.text());
+    try editor.insert('/');
+    editor.move(editor.len, false);
+    editor.left(true);
+    editor.backspace();
+    try std.testing.expectEqualStrings("/container/Document", editor.text());
+    editor.selectAll();
+    editor.left(false);
+    try std.testing.expectEqual(@as(usize, 0), editor.cursor);
+    editor.selectAll();
+    editor.right(false);
+    try std.testing.expectEqual(editor.len, editor.cursor);
+    const full: [files.max_path_bytes]u8 = @splat('x');
+    editor.set(&full, false);
+    try std.testing.expectError(error.PathTooLong, editor.insert('y'));
+    try std.testing.expectEqualSlices(u8, &full, editor.text());
+    try std.testing.expectError(error.UnsupportedCharacter, editor.insert(0x80));
+    editor.selectAll();
+    try editor.insert('z');
+    try std.testing.expectEqualStrings("z", editor.text());
+}
+
+test "window path keyboard opens canonical private folders and records actual history" {
+    var mock: Mock = .{};
+    var model: files.Model = .{};
+    try model.init(mock.provider(), "/container/Documents", "/container/Downloads");
+    try windowSend(&model, .{ .kind = .key_down, .code = 'l', .modifiers = ui.input.modifiers.control }, 800, 632);
+    try std.testing.expect(model.path_editing);
+    try std.testing.expectEqualStrings("~/Documents", model.headerPath());
+    try std.testing.expectEqual(@as(usize, 0), model.path_editor.selection().start);
+    try std.testing.expectEqual(model.path_editor.len, model.path_editor.selection().end);
+    try enterLocation(&model, "~//Downloads/");
+    try std.testing.expect(!model.path_editing and !model.status_error);
+    try std.testing.expectEqualStrings("~/Downloads", model.headerPath());
+    try std.testing.expectEqual(@as(u64, 1), model.path_commits);
+    try std.testing.expectEqual(@as(usize, 2), model.histories[0].count);
+    try windowSend(&model, .{ .kind = .key_down, .code = @backingInt(ui.input.Key.left), .modifiers = ui.input.modifiers.alt }, 800, 632);
+    try std.testing.expectEqualStrings("~/Documents", model.headerPath());
+    try windowSend(&model, .{ .kind = .key_down, .code = 'l', .modifiers = ui.input.modifiers.control }, 800, 632);
+    try windowSend(&model, .{ .kind = .key_down, .code = 'a', .modifiers = ui.input.modifiers.control }, 800, 632);
+    try windowSend(&model, .{ .kind = .text, .code = '/' }, 800, 632);
+    try windowSend(&model, .{ .kind = .key_down, .code = @backingInt(ui.input.Key.escape) }, 800, 632);
+    try std.testing.expect(!model.path_editing);
+    try std.testing.expectEqualStrings("~/Documents", model.headerPath());
+    try std.testing.expectEqual(@as(u64, 1), model.path_commits);
+    try std.testing.expectEqual(@as(usize, 2), model.histories[0].count);
+}
+
+test "failed typed locations retain directory listing selection history and sandbox boundary" {
+    const Provider = struct {
+        mock: Mock = .{},
+        calls: usize = 0,
+        fn list(context: *anyopaque, path: []const u8, cursor: *usize) anyerror!?files.Entry {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            if (std.mem.eql(u8, path, "/container/Documents/note.txt")) return error.NotDirectory;
+            if (std.mem.eql(u8, path, "/container/Missing")) return error.NotFound;
+            if (std.mem.eql(u8, path, "/container/Partial")) {
+                if (cursor.* != 0) return error.PermissionDenied;
+                cursor.* = 1;
+                return try files.Entry.init("temporary", .file, 1, false);
+            }
+            return Mock.listing(&self.mock, path, cursor);
+        }
+    };
+    var provider: Provider = .{};
+    var model: files.Model = .{};
+    try model.init(.{ .context = &provider, .list = Provider.list }, "/container/Documents", "/container/Downloads");
+    model.panes[0].selected = 0;
+    const initial = model.panes[0];
+    for ([_][]const u8{ "~/Documents/note.txt", "~/Missing", "~/Partial", "/private/108/container/notes.txt", "/container/../Downloads", "/container2" }, 0..) |path, index| {
+        const calls = provider.calls;
+        try enterLocation(&model, path);
+        try std.testing.expect(model.path_editing and model.status_error);
+        try std.testing.expectEqualStrings(path, model.headerPath());
+        try std.testing.expectEqualStrings("/container/Documents", model.panes[0].directory());
+        try std.testing.expectEqual(initial.count, model.panes[0].count);
+        try std.testing.expectEqual(initial.selected, model.panes[0].selected);
+        try std.testing.expectEqualSlices(u8, initial.entries[0].bytes(), model.panes[0].entries[0].bytes());
+        try std.testing.expectEqual(@as(usize, 1), model.histories[0].count);
+        try std.testing.expectEqual(@as(u64, 0), model.path_commits);
+        try std.testing.expectEqual(@as(u64, @intCast(index + 1)), model.path_rejections);
+        if (index >= 3) try std.testing.expectEqual(calls, provider.calls);
+    }
+}
+
+test "center path input stays separate from server chrome and tracks focused split pane" {
+    var mock: Mock = .{};
+    var model: files.Model = .{};
+    try model.init(mock.provider(), "/container/Documents", "/container/Downloads");
+    for ([_]i16{ 20, 103, 700, 780 }) |x| try windowSend(&model, .{ .kind = .pointer_down, .code = 1, .x = x, .y = 12 }, 800, 632);
+    try std.testing.expect(!model.path_editing);
+    try windowSend(&model, .{ .kind = .pointer_down, .code = 1, .x = 120, .y = 12 }, 800, 632);
+    try windowSend(&model, .{ .kind = .pointer_up, .code = 1, .x = 120, .y = 12 }, 800, 632);
+    try std.testing.expect(model.path_editing);
+    try std.testing.expectEqual(@as(usize, 0), model.path_editor.selection().start);
+    try std.testing.expectEqual(model.path_editor.len, model.path_editor.selection().end);
+    try windowSend(&model, .{ .kind = .key_down, .code = @backingInt(ui.input.Key.home) }, 800, 632);
+    try windowSend(&model, .{ .kind = .key_down, .code = @backingInt(ui.input.Key.right), .modifiers = ui.input.modifiers.shift }, 800, 632);
+    try std.testing.expectEqual(@as(usize, 1), model.path_editor.selection().end);
+    try windowSend(&model, .{ .kind = .key_down, .code = @backingInt(ui.input.Key.end) }, 800, 632);
+    try std.testing.expectEqual(model.path_editor.len, model.path_editor.cursor);
+    model.split = true;
+    try windowSend(&model, .{ .kind = .key_down, .code = @backingInt(ui.input.Key.tab) }, 800, 632);
+    try std.testing.expect(!model.path_editing and model.focus == 1);
+    try std.testing.expectEqualStrings("~/Downloads", model.headerPath());
+    try windowSend(&model, .{ .kind = .redraw, .code = 1 }, 316, 236);
+    try std.testing.expect(!model.split and model.focus == 0);
+    try std.testing.expectEqualStrings("~/Downloads", model.headerPath());
+    const more = (try files.Geometry.init(316, 204)).button(.more);
+    try windowSend(&model, .{ .kind = .pointer_down, .code = 1, .x = @intCast(more.x + 12), .y = @intCast(more.y + 32 + 12) }, 316, 236);
+    try windowSend(&model, .{ .kind = .pointer_up, .code = 1, .x = @intCast(more.x + 12), .y = @intCast(more.y + 32 + 12) }, 316, 236);
+    try std.testing.expect(model.menu != null and model.menu.?.kind == .more);
+}
+
+test "window path paints clipped proportional caret without touching chrome or stride padding" {
+    for ([_]struct { width: u32, height: u32 }{ .{ .width = 316, .height = 236 }, .{ .width = 396, .height = 542 }, .{ .width = 800, .height = 632 } }) |size| {
+        var mock: Mock = .{};
+        var model: files.Model = .{};
+        var workspace: files.Workspace = undefined;
+        try model.init(mock.provider(), "/container/Documents", "/container/Downloads");
+        const stride = size.width + 5;
+        const pixels = try std.testing.allocator.alloc(u32, @as(usize, stride) * size.height + 2);
+        defer std.testing.allocator.free(pixels);
+        @memset(pixels, 0x12345678);
+        var surface = try ui.Surface.init(pixels[1 .. pixels.len - 1], size.width, size.height, stride, .{ .red = 0xff0000, .green = 0xff00, .blue = 0xff });
+        const path = windowPath(size.width);
+        try windowSend(&model, .{ .kind = .key_down, .code = 'l', .modifiers = ui.input.modifiers.control }, size.width, size.height);
+        try windowSend(&model, .{ .kind = .key_down, .code = @backingInt(ui.input.Key.end) }, size.width, size.height);
+        model.path_editor.set("~/Documents/VeryLongFolderWWWWiiiWWWW/AnotherFolder", false);
+        try files.renderWindowWithWorkspace(&surface, &workspace, &model, path);
+        const visible = model.path_editor.visibleStart(path.width - 12);
+        if (size.width == 316) try std.testing.expect(visible != 0);
+        try std.testing.expect(@import("path_editor.zig").measured(model.path_editor.text()[visible..model.path_editor.cursor]) < path.width - 12);
+        var text_ink: usize = 0;
+        var caret_ink: usize = 0;
+        for (0..32) |y| for (0..size.width) |x| {
+            const pixel = pixels[1 + y * stride + x];
+            if (!path.contains(.{ .x = @intCast(x), .y = @intCast(y) })) try std.testing.expectEqual(@as(u32, 0x12345678), pixel);
+            if (pixel == surface.encode(files.colors.text)) text_ink += 1;
+            if (pixel == surface.encode(files.colors.accent)) caret_ink += 1;
+        };
+        try std.testing.expect(text_ink > 10 and caret_ink >= 14);
+        if (size.width == 800) for (40..64) |y| for (140..680) |x| try std.testing.expectEqual(surface.encode(files.colors.toolbar), pixels[1 + y * stride + x]);
+        const rendered = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(pixels));
+        // Partial glass coverage must depend on this frame's caption base,
+        // never the preceding submitted field pixels or an old file listing.
+        surface.fillRect(@intCast(path.x), @intCast(path.y), path.width, path.height, 0xff0000);
+        surface.fillRect(0, 32, size.width, size.height - 32, 0x00ff00);
+        try files.renderWindowWithWorkspace(&surface, &workspace, &model, path);
+        try std.testing.expectEqual(rendered, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(pixels)));
+        try std.testing.expectEqual(@as(u32, 0x12345678), pixels[0]);
+        try std.testing.expectEqual(@as(u32, 0x12345678), pixels[pixels.len - 1]);
+        for (0..size.height) |y| for (size.width..stride) |x| try std.testing.expectEqual(@as(u32, 0x12345678), pixels[1 + y * stride + x]);
+        try windowSend(&model, .{ .kind = .pointer_down, .code = 1, .x = @intCast(path.x + 6), .y = 12 }, size.width, size.height);
+        try std.testing.expectEqual(visible, model.path_editor.cursor);
+    }
+    try std.testing.expectError(error.InvalidViewport, files.layout.WindowGeometry.init(316, 235, false, windowPath(316)));
+    try std.testing.expectError(error.InvalidViewport, files.layout.WindowGeometry.init(316, 236, false, .{ .x = 104, .y = 20, .width = 112, .height = 24 }));
+}
+
+test "location editing below tabs preserves trusted caption and working navigation" {
+    const width = 316;
+    const height = 236;
+    const path = try files.layout.WindowGeometry.navigationPath(width);
+    try std.testing.expectEqual(@as(i32, 128), path.x);
+    try std.testing.expectEqual(@as(i32, 36), path.y);
+    var mock: Mock = .{};
+    var model: files.Model = .{};
+    try model.init(mock.provider(), "/container/Documents", "/container/Downloads");
+    try model.dispatchWindow(.{ .kind = .pointer_down, .code = 1, .x = @intCast(path.x + 8), .y = @intCast(path.y + 12) }, width, height, path);
+    try model.dispatchWindow(.{ .kind = .pointer_up, .code = 1, .x = @intCast(path.x + 8), .y = @intCast(path.y + 12) }, width, height, path);
+    try std.testing.expect(model.path_editing and model.path_activations == 1);
+
+    const untouched: u32 = 0x12345678;
+    const memory = try std.testing.allocator.alloc(u32, width * height);
+    defer std.testing.allocator.free(memory);
+    @memset(memory, untouched);
+    var surface = try ui.Surface.init(memory, width, height, width, .{ .red = 0xff0000, .green = 0xff00, .blue = 0xff });
+    var workspace: files.Workspace = undefined;
+    try files.renderWindowWithWorkspace(&surface, &workspace, &model, path);
+    for (memory[0 .. width * files.layout.window_header_height]) |pixel| try std.testing.expectEqual(untouched, pixel);
+    var location_ink: usize = 0;
+    for (36..68) |y| for (128..252) |x| {
+        if (memory[y * width + x] == surface.encode(files.colors.text)) location_ink += 1;
+    };
+    try std.testing.expect(location_ink > 20);
+
+    try model.dispatchWindow(.{ .kind = .key_down, .code = 'a', .modifiers = ui.input.modifiers.control }, width, height, path);
+    for ("~/Desktop") |byte| try model.dispatchWindow(.{ .kind = .text, .code = byte }, width, height, path);
+    try model.dispatchWindow(.{ .kind = .key_down, .code = @backingInt(ui.input.Key.enter) }, width, height, path);
+    try std.testing.expect(!model.path_editing and model.path_commits == 1);
+    try std.testing.expectEqualStrings("/container/Desktop", model.panes[0].directory());
+    try model.dispatchWindow(.{ .kind = .pointer_down, .code = 1, .x = 100, .y = 50 }, width, height, path);
+    try model.dispatchWindow(.{ .kind = .pointer_up, .code = 1, .x = 100, .y = 50 }, width, height, path);
+    try std.testing.expectEqualStrings("/container", model.panes[0].directory());
+    try std.testing.expectError(error.InvalidViewport, files.layout.WindowGeometry.init(width, height, false, .{ .x = 128, .y = 60, .width = 124, .height = 32 }));
+}
+
+test "captured body releases over every header region clear gestures without actions" {
+    const geometry = try files.Geometry.init(800, 600);
+    for ([_]i16{ 20, 120, 780 }) |header_x| {
+        var mock: Mock = .{};
+        var model: files.Model = .{};
+        try model.init(mock.provider(), "/container/Documents", "/container/Downloads");
+        const row = geometry.row(0, 0);
+        try windowSend(&model, .{ .kind = .pointer_down, .code = 1, .x = @intCast(row.x + 12), .y = @intCast(row.y + 32 + 10) }, 800, 632);
+        try windowSend(&model, .{ .kind = .pointer_move, .x = @intCast(row.x + 30), .y = @intCast(row.y + 32 + 10) }, 800, 632);
+        try std.testing.expect(model.drag != null and model.drag.?.moving);
+        try windowSend(&model, .{ .kind = .pointer_up, .code = 1, .x = header_x, .y = 12 }, 800, 632);
+        try std.testing.expect(model.drag == null and !model.path_editing);
+        const downloads = geometry.sidebar(.downloads);
+        try windowSend(&model, .{ .kind = .pointer_move, .x = @intCast(downloads.x + 20), .y = @intCast(downloads.y + 32 + 10) }, 800, 632);
+        try windowSend(&model, .{ .kind = .pointer_up, .code = 1, .x = @intCast(downloads.x + 20), .y = @intCast(downloads.y + 32 + 10) }, 800, 632);
+        try std.testing.expectEqual(@as(usize, 0), mock.moves + mock.copies);
+
+        const up = geometry.button(.up);
+        try windowSend(&model, .{ .kind = .pointer_down, .code = 1, .x = @intCast(up.x + 12), .y = @intCast(up.y + 32 + 12) }, 800, 632);
+        try std.testing.expect(model.pressed_action == .up);
+        try windowSend(&model, .{ .kind = .pointer_up, .code = 1, .x = header_x, .y = 12 }, 800, 632);
+        try std.testing.expect(model.pressed_action == null and !model.path_editing);
+        try windowSend(&model, .{ .kind = .pointer_up, .code = 1, .x = @intCast(up.x + 12), .y = @intCast(up.y + 32 + 12) }, 800, 632);
+        try std.testing.expectEqualStrings("/container/Documents", model.panes[0].directory());
+
+        try windowSend(&model, .{ .kind = .pointer_down, .code = 1, .x = @intCast(downloads.x + 20), .y = @intCast(downloads.y + 32 + 10) }, 800, 632);
+        try std.testing.expect(model.pressed_shortcut == .downloads);
+        try windowSend(&model, .{ .kind = .pointer_up, .code = 1, .x = header_x, .y = 12 }, 800, 632);
+        try std.testing.expect(model.pressed_shortcut == null and !model.path_editing);
+
+        model.panes[0].selected = 0;
+        const more = geometry.button(.more);
+        try windowSend(&model, .{ .kind = .pointer_down, .code = 1, .x = @intCast(more.x + 12), .y = @intCast(more.y + 32 + 12) }, 800, 632);
+        try windowSend(&model, .{ .kind = .pointer_up, .code = 1, .x = @intCast(more.x + 12), .y = @intCast(more.y + 32 + 12) }, 800, 632);
+        const menu = model.menu.?;
+        const bounds = try files.MenuGeometry.init(800, 600, menu.kind, menu.anchor);
+        const item = bounds.item(bounds.actionIndex(.nullify).?);
+        try windowSend(&model, .{ .kind = .pointer_down, .code = 1, .x = @intCast(item.x + 12), .y = @intCast(item.y + 32 + 12) }, 800, 632);
+        try std.testing.expect(model.menu.?.pressed != null);
+        try windowSend(&model, .{ .kind = .pointer_up, .code = 1, .x = header_x, .y = 12 }, 800, 632);
+        try std.testing.expect(model.menu == null and !model.path_editing);
+        try windowSend(&model, .{ .kind = .pointer_up, .code = 1, .x = @intCast(item.x + 12), .y = @intCast(item.y + 32 + 12) }, 800, 632);
+        try std.testing.expectEqual(@as(usize, 0), mock.nullifies);
+
+        try windowSend(&model, .{ .kind = .key_down, .code = @backingInt(ui.input.Key.f2) }, 800, 632);
+        const confirm = geometry.confirm();
+        try windowSend(&model, .{ .kind = .pointer_down, .code = 1, .x = @intCast(confirm.x + 12), .y = @intCast(confirm.y + 32 + 12) }, 800, 632);
+        try std.testing.expect(model.pressed_edit == .confirm);
+        try windowSend(&model, .{ .kind = .pointer_up, .code = 1, .x = header_x, .y = 12 }, 800, 632);
+        try std.testing.expect(model.pressed_edit == null and model.edit == .rename and !model.path_editing);
+        try std.testing.expectEqual(@as(usize, 0), mock.moves);
+    }
 }

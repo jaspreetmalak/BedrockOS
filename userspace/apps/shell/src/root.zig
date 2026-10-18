@@ -1,6 +1,10 @@
 //! Compact native desktop backdrop and working Files launch presentation.
 //! The trusted host owns launch/focus/window policy; this package paints only.
 pub const axisui = @import("axisui");
+pub const system_bar = @import("system_bar.zig");
+test {
+    _ = system_bar;
+}
 const Color = axisui.Color;
 const View = axisui.View;
 const wallpaper = @import("wallpaper.zig");
@@ -92,7 +96,21 @@ test "compact desktop covers reference scanout without touching stride padding o
         try std.testing.expect(!launch.contains(.{ .x = 100, .y = 36 }));
         var ink: usize = 0;
         for (0..bar_height) |y| for (94..166) |x| {
-            if (pixels[1 + y * stride + x] == surface.encode(palette.rose)) ink += 1;
+            const pixel = pixels[1 + y * stride + x];
+            // At least half-covered rose text over the opaque launch button.
+            // Supersampled strokes need not contain an entirely opaque pixel.
+            for (128..256) |coverage| {
+                const inverse = 255 - coverage;
+                const expected = Color.rgb(
+                    @intCast((@as(u32, palette.rose.r) * coverage + @as(u32, palette.button.r) * inverse + 127) / 255),
+                    @intCast((@as(u32, palette.rose.g) * coverage + @as(u32, palette.button.g) * inverse + 127) / 255),
+                    @intCast((@as(u32, palette.rose.b) * coverage + @as(u32, palette.button.b) * inverse + 127) / 255),
+                );
+                if (pixel == surface.encode(expected)) {
+                    ink += 1;
+                    break;
+                }
+            }
         };
         try std.testing.expect(ink > 35);
         try std.testing.expect(pixels[1 + 100 * stride + 100] != pixels[1 + (size.height - 1) * stride + size.width - 1]);
@@ -159,6 +177,35 @@ test "wallpaper is genuinely varied with intermediate rose and blue tones" {
     try std.testing.expect(blue_pixels > width * height / 20);
 }
 
+test "wallpaper light fields have restrained contrast and no hard plane edges" {
+    const std = @import("std");
+    for ([_]struct { width: u32, height: u32 }{
+        .{ .width = 800, .height = 600 }, .{ .width = 1280, .height = 800 },
+    }) |size| {
+        const pixels = try std.testing.allocator.alloc(u32, @as(usize, size.width) * size.height);
+        defer std.testing.allocator.free(pixels);
+        var surface = try axisui.Surface.init(pixels, size.width, size.height, size.width, .{ .red = 0xff0000, .green = 0xff00, .blue = 0xff });
+        try renderWallpaper(&surface);
+        for (0..size.height) |y| for (0..size.width) |x| {
+            const offset = y * size.width + x;
+            const current = surface.decode(pixels[offset]);
+            for ([_]u8{ current.r, current.g, current.b }) |value| try std.testing.expect(value < 100);
+            if (x != 0) {
+                const prior = surface.decode(pixels[offset - 1]);
+                try std.testing.expect(@abs(@as(i16, current.r) - prior.r) <= 3);
+                try std.testing.expect(@abs(@as(i16, current.g) - prior.g) <= 3);
+                try std.testing.expect(@abs(@as(i16, current.b) - prior.b) <= 3);
+            }
+            if (y != 0) {
+                const prior = surface.decode(pixels[offset - size.width]);
+                try std.testing.expect(@abs(@as(i16, current.r) - prior.r) <= 3);
+                try std.testing.expect(@abs(@as(i16, current.g) - prior.g) <= 3);
+                try std.testing.expect(@abs(@as(i16, current.b) - prior.b) <= 3);
+            }
+        };
+    }
+}
+
 test "bar-only rendering leaves wallpaper and padding outside36pixels unchanged" {
     const std = @import("std");
     const width = 800;
@@ -183,14 +230,16 @@ test "procedural wallpaper emits bounded row spans on command and tiny surfaces"
     const std = @import("std");
     const Sink = struct {
         rows: [32]u8 = @splat(0),
+        pixels: [64 * 32]u32 = @splat(0),
         valid: bool = true,
-        fn fill(ctx: *anyopaque, x: u32, y: u32, width: u32, height: u32, _: u32) void {
+        fn fill(ctx: *anyopaque, x: u32, y: u32, width: u32, height: u32, pixel: u32) void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             if (y >= 32 or x >= 64 or width == 0 or width > 64 - x or height != 1) {
                 self.valid = false;
                 return;
             }
             self.rows[y] += 1;
+            for (x..x + width) |column| self.pixels[@as(usize, y) * 64 + column] = pixel;
         }
     };
     var sink = Sink{};
@@ -198,6 +247,10 @@ test "procedural wallpaper emits bounded row spans on command and tiny surfaces"
     try renderWallpaper(&command_surface);
     try std.testing.expect(sink.valid);
     for (sink.rows) |count| try std.testing.expect(count > 0 and count <= wallpaper.max_fills_per_row);
+    var native_pixels: [64 * 32]u32 = undefined;
+    var native = try axisui.Surface.init(&native_pixels, 64, 32, 64, .{ .red = 0xff0000, .green = 0xff00, .blue = 0xff });
+    try renderWallpaper(&native);
+    try std.testing.expectEqualSlices(u32, &native_pixels, &sink.pixels);
     var tiny = [_]u32{ 0x12345678, 0, 0x12345678 };
     var surface = try axisui.Surface.init(tiny[1..2], 1, 1, 1, .{ .red = 0xff0000, .green = 0xff00, .blue = 0xff });
     try renderWallpaper(&surface);

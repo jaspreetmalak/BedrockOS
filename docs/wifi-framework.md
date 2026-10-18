@@ -1,8 +1,10 @@
 # Native Wi-Fi control foundation
 
 Bedrock provides a native Zig Wi-Fi control API and a bounded trusted controller.
-The current backend is a **simulated test radio**. Normal kernels report the
-radio as unavailable; no physical Wi-Fi adapter is supported or qualified.
+The acceptance backend is a **simulated test radio**. The later
+[native boot setup](wifi-boot-setup.md) adds a configured MT7922 path through a
+separately installed driver module; missing module or board/platform inputs keep
+controls unavailable. No physical radio is qualified.
 VirtIO networking remains Ethernet. These tests do not transmit radio traffic,
 connect to an access point, authenticate WPA2, or configure an IP network.
 
@@ -154,7 +156,8 @@ not a ready-made FullMAC Ethernet adapter. The isolated Zig translations preserv
 ISC or selected BSD notices and immutable provenance. Shared original 802.11 code
 implements WPA2 derivation, bounded authentication/association wire helpers and
 the CCMP four-way handshake, including GTK unwrap and no key reinstall on replay.
-No vendor firmware blob is included in boot images. See
+Ordinary boot images do not embed vendor firmware. Dedicated Wi-Fi images
+package the pinned blobs as separate EFI filesystem assets. See
 [driver translation scope](wifi-driver-porting.md) for exact implemented subsets,
 source/firmware licenses, cache-only reference checks and remaining radio gates.
 
@@ -204,3 +207,11 @@ zig build -j2 --summary all
 results establish the stated control/broker boundary on named QEMU references.
 No physical Wi-Fi adapter, access-point association or WPA2 implementation is
 qualified.
+
+The later [native MT7922 station path](wifi-station.md) implements portable
+MAC/WPA2/software-CCMP, owned data/status queues and a trusted controller adapter.
+That implementation now belongs to the separately linked MT7922 module under
+`drivers/`; normal kernel radio controls use the versioned C ABI. Installed
+packages are selected by exact PCI identities before entry. A match does not
+replace explicit firmware/platform/calibration/entropy preparation. Explicit
+static IPv4 attachment is separate from association and does not supply DHCP.

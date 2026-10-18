@@ -1,7 +1,7 @@
 # Proposed Bedrock boot protocol
 
 This independent Zig 0.17.0 package sketches a common handoff ABI for x86-64,
-AArch64, and RV64. The wire version is draft major 0/minor 2. The ABI is proposed
+AArch64, and RV64. The wire version is draft major 0/minor 6. The ABI is proposed
 and has not been finalized. No bootloader
 or kernel entry implementation is provided.
 
@@ -18,17 +18,18 @@ package does not yet provide a byte-stream decoder.
 - `Header.validate(available_bytes, expected_architecture)`: reject bad magic,
   unsupported major versions, undersized or truncated headers, and wrong or
   unknown architecture tags, and nonzero reserved fields. Future minor versions and longer accessible headers
-  are accepted. Extension semantics are intentionally not defined yet.
+  are accepted; full consumers still require all bytes of the current record.
 - `PhysicalRange`: 16-byte base/length pair; `endExclusive()` returns a checked
   exclusive end or `PhysicalRangeOverflow`. Empty ranges are valid. A range
   reaching an exclusive end of 2^64 is rejected because that end is unrepresentable.
 - `MemoryRegion`: 24-byte physical range, numeric kind, and reserved attributes.
   Unknown kinds should be treated as reserved. Producers currently write zero
   reserved fields and attributes.
-- `BootInfo`: 2,816-byte record containing the original boot prefix, up to 64
+- `BootInfo`: 4,136-byte record containing the original boot prefix, up to 64
   sorted memory regions, typed console, CPU entry state, firmware environment,
   ACPI/framebuffer descriptions, an owned raw EFI memory-map reference,
-  physical-address width and up to 64 explicit accessible ranges. The original
+  physical-address width, up to 64 explicit accessible ranges, optional Wi-Fi
+  assets, retained driver images, installed-app archive and firmware wall clock. The original
   v0.1 field offsets remain intact, but full consumers require the current size.
   The prefix RAM envelope may contain holes and does not grant allocation/access.
   `validate()` checks the record, metadata and range ownership. Callers must check
@@ -40,6 +41,10 @@ package does not yet provide a byte-stream decoder.
 - `MappedRanges`: sorted bounded identity coverage, separate from ownership.
   UEFI requires explicit coverage of retained references; reset profiles may
   leave it absent and retain their documented mapping contracts.
+- `WallClock`: 24-byte optional UEFI calendar baseline. Known timezones normalize
+  seconds to UTC with an explicit offset; an unspecified timezone remains local.
+  Missing or invalid clock data remains unavailable. See the
+  [clock contract](../docs/wall-clock.md).
 
 Build with `zig build`, run native tests with `zig build test`, and compile without
 execution with `zig build check`. Standard target and optimization options are

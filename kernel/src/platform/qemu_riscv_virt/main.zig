@@ -82,7 +82,7 @@ fn readBe32(address: usize) u32 {
         (@as(u32, bytes[2]) << 8) | @as(u32, bytes[3]);
 }
 
-fn validatePlatform(info: protocol.BootInfo) void {
+fn validatePlatform(info: *const protocol.BootInfo) void {
     if (options.uefi_entry) {
         if (info.boot_environment != @backingInt(protocol.BootEnvironment.uefi) or
             info.entry_state != @backingInt(protocol.EntryState.riscv64_s)) fail("unexpected UEFI entry state");
@@ -155,7 +155,8 @@ export fn bedrock_riscv_kernel_main(raw_info: usize, available_bytes: usize, are
     if (available_bytes < @sizeOf(protocol.BootInfo) or
         header.header_size < @sizeOf(protocol.BootInfo))
         fail("truncated handoff record");
-    const info = @as(*const protocol.BootInfo, @ptrFromInt(raw_info)).*;
+    // Retain one validated handoff owner instead of making secret seed copies.
+    const info: *const protocol.BootInfo = @ptrFromInt(raw_info);
     info.validate(available_bytes, .riscv64) catch |err| {
         console.write("[fault] kernel handoff: ");
         console.write(@errorName(err));
@@ -184,7 +185,7 @@ export fn bedrock_riscv_kernel_main(raw_info: usize, available_bytes: usize, are
     console.write(" reserved through=");
     console.writeHex(info.kernel_reserved.base + info.kernel_reserved.length);
     console.write("\n");
-    memory.initialize(console, &info) catch |err| {
+    memory.initialize(console, info) catch |err| {
         console.write("[fault] kernel memory initialization: ");
         console.write(@errorName(err));
         console.write("\n");
@@ -195,7 +196,7 @@ export fn bedrock_riscv_kernel_main(raw_info: usize, available_bytes: usize, are
     if (breakState().* != 2) fail("deliberate trap did not resume");
     breakState().* = 0;
     if (options.uefi_entry) {
-        @import("isolation").run(console, &info) catch |err| {
+        @import("isolation").run(console, info) catch |err| {
             console.write("[fault] kernel isolation: ");
             console.write(@errorName(err));
             console.write("\n");
@@ -207,7 +208,7 @@ export fn bedrock_riscv_kernel_main(raw_info: usize, available_bytes: usize, are
         graphics_enabled = false;
         uart.init();
         console_ready = true;
-        @import("isolation").runDesktop(console, &info, "RV64") catch |err| {
+        @import("isolation").runDesktop(console, info, "RV64") catch |err| {
             framebuffer.configure(info.framebuffer);
             fail(@errorName(err));
         };

@@ -4,9 +4,12 @@ const std = @import("std");
 const ui = @import("axisui");
 const api = @import("provider.zig");
 const layout = @import("layout.zig");
+const path_edit = @import("path_editor.zig");
 pub const Pane = struct {
     path: [api.max_path_bytes]u8 = undefined,
     path_len: usize = 0,
+    display_path: [api.max_path_bytes]u8 = undefined,
+    display_path_len: usize = 0,
     entries: [api.max_entries]api.Entry = undefined,
     count: usize = 0,
     selected: ?usize = null,
@@ -14,6 +17,12 @@ pub const Pane = struct {
     truncated: bool = false,
     pub fn directory(self: *const Pane) []const u8 {
         return self.path[0..self.path_len];
+    }
+    pub fn location(self: *const Pane) []const u8 {
+        return self.display_path[0..self.display_path_len];
+    }
+    fn syncLocation(self: *Pane) void {
+        self.display_path_len = path_edit.display(self.directory(), &self.display_path).len;
     }
 };
 pub const Edit = enum { none, new_file, new_folder, rename };
@@ -60,6 +69,7 @@ pub const Model = struct {
     panes: [2]Pane = .{ .{}, .{} },
     focus: usize = 0,
     split: bool = false,
+    split_allowed: bool = true,
     histories: [2]History = .{ .{}, .{} },
     clipboard: ?Clipboard = null,
     revision: u64 = 0,
@@ -74,6 +84,11 @@ pub const Model = struct {
     edit_text: [api.max_name_bytes]u8 = undefined,
     edit_len: usize = 0,
     edit_cursor: usize = 0,
+    path_editing: bool = false,
+    path_editor: path_edit.Editor = .{},
+    path_activations: u64 = 0,
+    path_commits: u64 = 0,
+    path_rejections: u64 = 0,
     status: [160]u8 = undefined,
     status_len: usize = 0,
     status_error: bool = false,
@@ -90,12 +105,21 @@ pub const Model = struct {
     preview_path: [api.max_path_bytes]u8 = undefined,
     preview_path_len: usize = 0,
 
+    /// Upgrade an existing private container without recreating sample files.
+    /// An unavailable/full/read-only provider or an existing item named Desktop
+    /// must not prevent launch. Navigation still reports the provider's error.
+    pub fn ensureDesktop(provider: api.Provider) void {
+        const mkdir = provider.mkdir orelse return;
+        mkdir(provider.context, layout.shortcutPath(.desktop)) catch {};
+    }
+
     pub fn init(self: *Model, provider: api.Provider, left: []const u8, right: []const u8) !void {
         try api.validatePath(left);
         try api.validatePath(right);
         self.provider = provider;
         self.focus = 0;
         self.split = false;
+        self.split_allowed = true;
         self.clipboard = null;
         self.revision = 0;
         self.drag = null;
@@ -107,6 +131,11 @@ pub const Model = struct {
         self.pressed_edit = null;
         self.edit_len = 0;
         self.edit_cursor = 0;
+        self.path_editing = false;
+        self.path_editor = .{};
+        self.path_activations = 0;
+        self.path_commits = 0;
+        self.path_rejections = 0;
         self.status_len = 0;
         self.pointer = .{ .x = 0, .y = 0 };
         self.initialized = true;
@@ -120,6 +149,7 @@ pub const Model = struct {
         for (&self.panes, &self.histories, [_][]const u8{ left, right }) |*pane, *history, path| {
             @memcpy(pane.path[0..path.len], path);
             pane.path_len = path.len;
+            pane.syncLocation();
             pane.count = 0;
             pane.selected = null;
             pane.scroll = 0;
@@ -140,6 +170,117 @@ pub const Model = struct {
     pub fn previewText(self: *const Model) []const u8 {
         return self.preview[0..self.preview_len];
     }
+    pub fn headerPath(self: *const Model) []const u8 {
+        return if (self.path_editing) self.path_editor.text() else self.panes[self.focus].location();
+    }
+    fn beginPathEditing(self: *Model) !void {
+        if (self.edit != .none) return error.FinishEditing;
+        self.dismissMenu();
+        self.drag = null;
+        self.pressed_action = null;
+        self.pressed_shortcut = null;
+        self.path_editor.set(self.panes[self.focus].location(), true);
+        self.path_editing = true;
+        self.path_activations +|= 1;
+        self.setStatus("Enter a folder location / Enter opens / Escape cancels", false);
+    }
+    fn cancelPathEditing(self: *Model) void {
+        self.path_editing = false;
+        self.path_editor.set(self.panes[self.focus].location(), false);
+        self.setStatus("Location editing cancelled", false);
+    }
+    fn pathKeyboard(self: *Model, event: ui.Event, geometry: layout.Geometry) !void {
+        if (event.kind == .text) {
+            if (event.modifiers & (ui.input.modifiers.control | ui.input.modifiers.alt | ui.input.modifiers.super) != 0) return;
+            try self.path_editor.insert(event.code);
+            self.changed();
+            return;
+        }
+        if (event.kind != .key_down) return;
+        if (event.modifiers & ui.input.modifiers.control != 0) {
+            if (event.code == 'a' or event.code == 'A') {
+                self.path_editor.selectAll();
+                self.changed();
+            }
+            return;
+        }
+        if (event.modifiers & (ui.input.modifiers.alt | ui.input.modifiers.super) != 0) return;
+        const extend = event.modifiers & ui.input.modifiers.shift != 0;
+        switch (event.code) {
+            @backingInt(ui.input.Key.enter) => {
+                errdefer self.path_rejections +|= 1;
+                const path = try path_edit.canonical(self.path_editor.text(), &self.path_scratch[1]);
+                try self.navigate(self.focus, path);
+                self.path_editing = false;
+                self.preview_open = false;
+                self.path_editor.set(self.panes[self.focus].location(), false);
+                self.path_commits +|= 1;
+                self.changed();
+            },
+            @backingInt(ui.input.Key.escape) => self.cancelPathEditing(),
+            @backingInt(ui.input.Key.left) => self.path_editor.left(extend),
+            @backingInt(ui.input.Key.right) => self.path_editor.right(extend),
+            @backingInt(ui.input.Key.home) => self.path_editor.move(0, extend),
+            @backingInt(ui.input.Key.end) => self.path_editor.move(self.path_editor.len, extend),
+            @backingInt(ui.input.Key.backspace) => self.path_editor.backspace(),
+            @backingInt(ui.input.Key.delete) => self.path_editor.delete(),
+            @backingInt(ui.input.Key.tab) => {
+                self.cancelPathEditing();
+                try self.keyboard(event, geometry);
+            },
+            else => return,
+        }
+        self.changed();
+    }
+    /// Window-only controller: the service retains title/control hit regions.
+    /// Body coordinates are translated once, preserving the legacy controller.
+    pub fn dispatchWindow(self: *Model, event: ui.Event, width: u32, height: u32, path: ui.Rect) !void {
+        if (!self.initialized) return error.NotInitialized;
+        const geometry = try layout.WindowGeometry.init(width, height, self.split, path);
+        if (event.kind == .key_down and event.modifiers & ui.input.modifiers.control != 0 and
+            event.modifiers & (ui.input.modifiers.alt | ui.input.modifiers.super) == 0 and (event.code == 'l' or event.code == 'L'))
+        {
+            self.beginPathEditing() catch |err| self.fail(err);
+            return;
+        }
+        const pointer_event = event.kind == .pointer_down or event.kind == .pointer_up or event.kind == .pointer_move or event.kind == .wheel;
+        const point: ui.Point = .{ .x = event.x, .y = event.y };
+        if (pointer_event and self.edit == .none and path.contains(point)) {
+            if (event.kind == .pointer_down and event.code == @backingInt(ui.input.Button.left)) {
+                if (!self.path_editing) {
+                    self.beginPathEditing() catch |err| self.fail(err);
+                } else {
+                    const local_x: u32 = @intCast(@max(0, point.x - path.x - 6));
+                    self.path_editor.move(self.path_editor.cursorAt(path.width -| 12, local_x), event.modifiers & ui.input.modifiers.shift != 0);
+                    self.changed();
+                }
+                return;
+            }
+            // Captured body releases still have to cancel their original
+            // gesture, including drops over this location field.
+            if (event.kind != .pointer_up) return;
+        }
+        if (pointer_event and event.y < layout.window_header_height) {
+            if (event.kind == .pointer_up) {
+                // The host delivers terminal releases for a captured body
+                // gesture even over chrome. An outside-body point clears its
+                // capture without activating a body control or the path field.
+                var outside = event;
+                outside.y = -1;
+                try self.dispatch(outside, width, height - layout.window_header_height);
+                return;
+            }
+            return;
+        }
+        if (self.path_editing and (event.kind == .key_down or event.kind == .key_up or event.kind == .text)) {
+            self.pathKeyboard(event, geometry.content) catch |err| self.fail(err);
+            return;
+        }
+        if (self.path_editing and event.kind == .pointer_down) self.cancelPathEditing();
+        var translated = event;
+        if (pointer_event) translated.y -= layout.window_header_height;
+        try self.dispatch(translated, width, height - layout.window_header_height);
+    }
     pub fn closePreview(self: *Model) void {
         self.preview_open = false;
         self.setStatus("Preview closed", false);
@@ -153,6 +294,9 @@ pub const Model = struct {
         self.status_error = failed;
         self.status_notice = false;
         self.changed();
+    }
+    pub fn reportError(self: *Model, err: anyerror) void {
+        self.fail(err);
     }
     fn fail(self: *Model, err: anyerror) void {
         const message: []const u8 = switch (err) {
@@ -257,7 +401,8 @@ pub const Model = struct {
             .remove => if (entry) |value| !value.read_only and provider.remove != null else false,
             .nullify => if (entry) |value| value.kind == .file and !value.read_only and provider.nullify != null else false,
             .paste => writable_directory and if (self.clipboard) |clip| (if (clip.cut) provider.move != null else provider.copy != null) else false,
-            .refresh, .split => true,
+            .refresh => true,
+            .split => self.split_allowed,
             else => false,
         };
     }
@@ -506,6 +651,7 @@ pub const Model = struct {
             .back => try self.traverseHistory(false),
             .forward => try self.traverseHistory(true),
             .split => {
+                if (!self.split_allowed) return error.Unsupported;
                 self.split = !self.split;
                 if (!self.split) self.focus = 0;
                 self.setStatus(if (self.split) "Split view" else "Single view", false);
@@ -552,6 +698,7 @@ pub const Model = struct {
             return err;
         };
         if (record_history) self.histories[pane_index].record(pane.directory());
+        pane.syncLocation();
         self.drag = null;
         self.edit = .none;
         self.setStatus("Directory opened", false);
@@ -697,10 +844,27 @@ pub const Model = struct {
     pub fn dispatch(self: *Model, event: ui.Event, width: u32, height: u32) !void {
         if (!self.initialized) return error.NotInitialized;
         const geometry = try layout.Geometry.initMode(width, height, self.split);
+        self.split_allowed = geometry.canSplit();
+        if (self.split and !geometry.split) {
+            self.split = false;
+            if (self.focus == 1) {
+                std.mem.swap(Pane, &self.panes[0], &self.panes[1]);
+                std.mem.swap(History, &self.histories[0], &self.histories[1]);
+            }
+            self.focus = 0;
+            self.dismissMenu();
+            self.drag = null;
+            self.pressed_action = null;
+            self.changed();
+        }
         self.handle(event, geometry) catch |err| self.fail(err);
     }
     fn handle(self: *Model, event: ui.Event, geometry: layout.Geometry) !void {
         if (event.kind == .redraw) {
+            for (self.panes[0..if (geometry.split) @as(usize, 2) else 1]) |*pane| if (pane.selected) |index| {
+                if (index >= pane.count) continue;
+                if (index >= pane.scroll + geometry.visible_rows) pane.scroll = index + 1 - geometry.visible_rows;
+            };
             if (event.code == 1) {
                 self.dismissMenu();
                 self.drag = null;

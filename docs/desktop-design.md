@@ -1,242 +1,271 @@
 # Bedrock desktop direction
 
-Bedrock's desktop direction combines a compact, Hyprland-inspired dark pastel
-theme with familiar file-manager navigation and native window controls. The
-inspiration comes from [Hyprland's official site](https://hypr.land/) and
-[project repository](https://github.com/hyprwm/Hyprland). Bedrock is building its
-own desktop on its own kernel and application model. This is not a Hyprland
-port, and it promises no Wayland, Linux or external API/binary compatibility.
+Bedrock combines a compact, Hyprland-inspired dark pastel theme with familiar
+file-manager navigation and native window controls. The inspiration comes from
+[Hyprland's official site](https://hypr.land/) and
+[project repository](https://github.com/hyprwm/Hyprland). Bedrock builds its own
+kernel, application model and native Zig UI; it promises no Hyprland, Wayland,
+Linux or external binary/API compatibility.
 
-## Interaction and visual direction
+Normal UEFI selects the [native window desktop](window-desktop.md): installed
+init 101 starts compositor 104, shell 107, Files 2 and Notes 108 as five protected
+processes. Files and Notes have independent windows and private containers.
+The [menu framework](system-menus.md) gives each window its own app menus, with
+a separate trusted system bar for local time and a frosted Control Center.
+The [glass revision](glass-desktop.md) uses softer floating silhouettes and
+lighter wallpaper-based materials throughout the native desktop.
+The preceding [native UI revision](native-ui-verification.md) passed its Debug/ReleaseSafe
+matrix on all three QEMU references, including original Axis Sans, centered path
+editing and service-owned right-side controls. The
+[preceding window record](window-desktop-verification.md) remains archived. The earlier
+[single-window service desktop](service-desktop.md),
+[fixed protected display demonstration](protected-display.md) with clients
+105/106, and kernel-hosted Files workflow remain regression profiles.
 
-- The current window floats above a charcoal wallpaper with a quiet border,
-  subtle shadow and rose, cream and blue caption controls.
-- Frosted window backgrounds, navigation and the launch bar use AxisUI materials
-  over an immutable blurred wallpaper cache. Text and controls remain crisp.
-- A 36-pixel bar contains the actual Files launcher and a small architecture
-  label. Decorative workspaces, simulated system status and debug panels are
-  absent from the current desktop.
-- Files defaults to one list with Places, breadcrumbs, back/forward/up navigation
-  and a single 40-pixel header with Split/More. File actions appear in native
-  background/item right-click menus and More; no mutation command strip remains.
-- Mouse close, minimize, maximize/restore and fullscreen controls are independent
-  actions. F11 toggles fullscreen, Escape exits it, and Alt+F4 closes Files.
-- Tiling, multiple apps and workspaces remain future service/compositor work.
+## Appearance and interaction
 
-Sizes, colors, layouts and bindings should remain adjustable without changing
-app authority or kernel policy. The initial native design uses charcoal
-surfaces, muted pastel accents, mixed-case text and small reusable native icons.
-AxisUI shares the font's six-pixel advance and ten-pixel line height between
-measurement and drawing; filenames retain their case.
+The desktop keeps its procedural charcoal, rose and blue wallpaper, 36-pixel
+Files/Notes launch bar, four workspace indicators, antialiased 8-pixel floating
+corners, a thin translucent rim and a soft offset shadow. Rounded launch pills
+and small active markers replace segmented bar blocks. A compact 32-pixel native header offers a normal app-title/accessory layout
+or a tabs-only layout, with neutral minimize/maximize/close controls
+right. The 46×32 controls fill the caption height and meet the right edge.
+Minimize and Maximize/Restore reveal neutral rectangular hover/press fills;
+Close uses a red hover fill, deeper pressed red and white X. Maximized,
+fullscreen and tiled frames use square corners without floating shadows.
+The darker RGB(20,21,26) strip is the title bar. Files uses its tabs-only
+accessory from the left edge, with no visible Files caption and a
+lighter RGB(39,43,54) active tab. AxisUI lets apps configure tab colors and
+their own menu contents, materials and placement independently of the trusted
+window controls and system bar.
+Native AxisUI frosted materials sample an immutable blurred wallpaper
+cache; lower tint opacity lets the muted wallpaper colors show through while
+text, icons and controls remain crisp. The shell owns wallpaper and bar
+views, while the compositor draws window chrome and cursor. No HTML is used.
 
-## Native UI and shell architecture
+Files opens one list with Places and a 40-pixel navigation row containing
+Back/Forward/Up, the editable path, Split/More. The path is below the caption
+at x128, y36, height32; its width reserves 116 trailing pixels at widths of
+640 or more, and 64 pixels otherwise. Click the location or
+press Ctrl+L to edit it, then Enter to navigate or Escape to restore the current
+location. `~/Desktop`, `~/Documents`, `~/Downloads` and canonical private `/container/...`
+paths resolve within Files' own container. Invalid, missing or denied locations
+preserve the current listing and history and show an error. Mutations appear in
+native item/background context menus and More. Places provides Home, Documents,
+Downloads and Desktop; each pane
+keeps eight history locations. Optional Split adds a second pane. Copy/Cut/Paste,
+create/mkdir, rename/delete, drag move, Ctrl-drag copy and a copied read-only text
+preview remain available through checked file operations. At narrower widths,
+Files retains Places/More and one pane; Split becomes available at 640 pixels.
+Its body supports client areas down to 316×204 pixels.
 
-Bedrock builds its UI framework from scratch in Zig. `frameworks/public/AxisUI/`
-provides the app-facing declarative model: `View`, `Text`, `HStack`, `VStack`,
-`ZStack`, `Spacer` and layout/style modifiers. It computes native view layout and
-draws through a software renderer. A pixel surface uses caller-owned storage;
-a command surface sends clipped drawing to supplied callbacks. The initial
-public API is experimental. Applications compose views;
-they do not receive unrestricted access to another app's surface or the display.
+Files supports four windows in its single protected process and connection,
+with eight independent folder tabs in each. Its title accessory at x8, y4,
+width `client_width-154`, height24 holds the public AxisUI tab widget. Tabs retain
+their own folder paths, history, pane split/focus, selection and scroll, while
+sharing the Files process's clipboard. Switching relists through the checked provider
+and cancels stale gestures and previews. Use + or Ctrl+T to add, click to
+select, X/middle-click or Ctrl+W to close, and Ctrl+Tab/Ctrl+Shift+Tab to cycle.
+The wheel reaches hidden tabs at narrow widths; overflow arrows appear when
+space permits. Closing the active tab selects a neighbor; closing the last
+tab closes that window; the process exits after its final window closes.
+Dragging across neighboring tab midpoints reorders by stable ID with a native
+lifted-tab preview and insertion marker. A vertical release outside the strip
+tears the tab into a real, independently focused and movable window. The source
+keeps the record until the destination presents an acknowledged frame; failure
+or cancellation leaves it in place. Tearing the only tab moves its existing
+window. Escape or geometry/hide cancellation stops an unfinished drag.
+File/Edit/View menus temporarily overlay the navigation
+row when opened with Alt+F/E/V. More and right-click retain the normal file
+commands. The tab widget allocates no storage; the app owns its bounded
+navigation snapshots and provider permissions.
 
-Text and child-view slices are borrowed and must remain valid and unchanged
-through synchronous rendering. `Workspace` supplies bounded caller-owned layout
-and clipping scratch. `AxisUI.renderWithWorkspace(surface, workspace, view)`
-uses that storage without allocating. Initialize scratch as `undefined` and keep
-exclusive access through the call; its contents are transient implementation
-state. The convenience `render` uses stack scratch and requires sufficient
-caller stack space.
+The desktop uses Bedrock's original proportional
+[Axis Sans](../frameworks/public/AxisUI/AXIS_SANS.md) typeface. A native grayscale
+coverage atlas smooths text at UI scale1, with a 14×20 base cell, 15-pixel
+baseline and 12-pixel cap height. Measurement and painting use the same glyph
+advances and 20-pixel line height. Larger integer scales evaluate round-stroke
+coverage from compact fixed-point vectors flattened from the original curves,
+with 8×8 subpixel samples at partial edges. Text never enlarges the base bitmap;
+tiny sizes still have the physical display's pixel-density limit. No Apple or other
+external font assets are imported. The current face covers 95 printable ASCII
+glyphs and substitutes `?` for unsupported bytes; Unicode shaping remains
+future work. Notes centers these glyphs within fixed 14-pixel editor cells.
 
-[`userspace/apps/shell`](../userspace/apps/shell/README.md) composes the desktop with AxisUI.
-It owns the wallpaper, theme and compact launch bar. The Zig module
-is `desktop_shell`, with compile-probe artifact `bedrock-desktop-shell`.
-These visual components are desktop code; AxisUI supplies reusable app-facing
-primitives.
+Context menus select their target row, disable unavailable/read-only actions,
+and require matching left press/release. Escape, outside clicks, navigation,
+refresh and geometry updates dismiss stale targets. Create/Save/Cancel and
+Enter/Escape operate name editing. Double-click, Enter or Open previews the first
+512 bytes; Back/Escape closes it. The current path/name editors accept ASCII.
+Errors are visible and do not silently replace destinations.
 
-`userspace/apps/` contains application sources, including this shell.
-`userspace/services/` is the home for future display/compositor, input, launch
-and broker processes. Its window-server module currently supplies portable
-single-window policy to the kernel host; no standalone service process exists.
-Source paths are independent of installed bundles and service paths. Moving the
-shell source does not create a user-space process: its renderer still runs
-through the temporary kernel display host.
+The separate red **Nullify (zero + delete)** item is file-only. Its checked
+syscall overwrites, flushes and reads back both complete logical storage banks
+before removing the namespace entry. Matching preview/clipboard caches clear
+after success. SSD remapping, backups and independent copies are outside that
+logical-bank contract; see [context menus and Nullify](context-menus-and-nullify.md).
 
-`frameworks/private/` is reserved for reusable internal OS APIs and service
-mechanisms, such as future display IPC clients, surface-handle operations and
-internal broker interfaces. Private NetworkCore now supplies reusable IPv4/UDP
-packet mechanisms behind the public NetworkKit/runtime boundary; see the
-[network framework](network-framework.md). Display IPC remains future work.
-Desktop themes, bars and view composition stay in the shell package.
+Caption dragging moves a floating window; border and corner dragging resize it.
+Close, minimize and maximize/restore use the service-owned controls. F11 toggles
+fullscreen, Escape exits it and Alt+F4 closes the focused client. Fullscreen
+retains the compact caption and its three controls. Restoring a retained window
+preserves its saved floating geometry or preceding mode; a new process requests
+its initial frame through the native SDK.
 
-Public and private describe the API, support and distribution boundary. A private
-directory is not a security boundary. Shell and app processes must use
-private address spaces, checked capability syscalls and explicit surface/input
-grants. AxisUI and the shell composition remain usable without kernel or firmware
-imports. The current kernel hosts the shell renderer and window/display policy.
-Its bridge adapts the validated supervisor framebuffer into an AxisUI `Surface`
-and calls the shell's wallpaper and bar renderers with layout scratch retained
-in kernel BSS. It builds a separate downsampled blur cache from wallpaper alone
-before painting bars, windows or the pointer, then retains it across redraws.
-The single-CPU boot path owns this scratch exclusively, keeping the large layout
-plan off the guarded execution stack. Framework code takes no ownership of the
-view tree or surface.
+Minimize retains the same process, surface and model state but configures a
+hidden viewport. The matching launch chip, Super+E for Files or Super+N for Notes
+restores it. Close retires the selected Files window while its other windows
+continue under the same PID. The final window closes that app; a later launch
+starts a new PID against its persisted private data. Geometry changes rotate the viewport epoch, discard old queued
+coordinates and request a native redraw. Input follows the focused app, with
+client pointer capture retaining an outside release. Window controls consume
+their own press/release sequences. The optional centered accessory routes input
+to its client and is excluded from title dragging; the compositor copies client
+caption pixels only inside that reserved rectangle.
 
-AxisCore and additional native service frameworks are future work. Their APIs
-and implementations will follow concrete process, IPC and object-lifetime needs;
-the current framework milestone does not claim those services exist.
+Four workspaces retain independent tiling settings. Super+1 through Super+4
+switch workspaces, Super+Shift+1 through Super+Shift+4 move the focused window,
+Super+T toggles equal-column tiling and Super+Tab cycles visible focus. The
+current catalogue supports two GUI apps: four Files windows and one Notes
+window, across five processes including init, shell and the display service. General
+GUI installation, automatic view bindings and GPU rendering remain future work.
 
-## Current protected Files desktop
+## Native UI and source ownership
 
-| Layer | Scope | What it demonstrates |
-| --- | --- | --- |
-| Kernel framebuffer console | Startup and fault diagnostics | Existing memory, isolation, lifecycle and timer checks |
-| Public AxisUI | Declarative views, layout, software drawing, events and explicit revision state | Pixel and command surfaces, bounded queues/hit tests and clipped cursor |
-| `userspace/apps/shell` | Desktop background, theme and launch bar | Charcoal/pastel appearance with an actual bounded Files launch target |
-| `userspace/apps/files` | Separately linked protected native ELF | Single list/sidebar, optional Split, clipboard and text preview through checked authority callbacks |
-| Current kernel display host | Modern VirtIO input, clipped drawing, focus and window policy | Movable Files window with close, minimize, maximize/restore and fullscreen |
-| Future standalone compositor | Independent app surfaces and display IPC | Multiple protected application windows and service ownership |
+`frameworks/public/AxisUI/` provides reusable app-facing views, stacks, text,
+layout/style modifiers, native tab/menu widgets, software drawing, events, explicit state and bounded
+queues/hit tests. Pixel surfaces borrow caller-owned storage with explicit
+dimensions, stride and color masks. Command surfaces route clipped drawing to
+a supplied sink; the legacy Files host retains that adapter. Installed Files,
+Notes and shell render directly to their own checked logical RGB pixel surfaces.
 
-Files begins in `/container/Documents` and `/container/Downloads` under trusted
-app identity 2. User paths cannot choose another app ID. The app owns no raw
-device or framebuffer mapping: its provider adapts checked file syscalls, while
-AxisUI command callbacks submit drawing that the kernel clips to client bounds.
+Text and child-view slices remain borrowed through synchronous rendering.
+`AxisUI.renderWithWorkspace(surface, workspace, view)` uses caller-owned
+scratch without allocation. Native desktop programs keep their large layout and
+blur scratch in private BSS. Framework code does not own app views, surfaces,
+device access or process lifetime.
 
-Places provides Home, Documents and Downloads. Each pane has a bounded history
-of eight locations. Copy and Cut record a copied source path; Paste transfers to
-the current folder through the checked provider. Context menus select their
-targeted row, disable unavailable/read-only actions and activate only on a
-matched left press/release. Outside clicks, Escape, keyboard navigation, refresh
-and geometry changes dismiss stale menu targets. Create/Save/Cancel buttons and
-Enter/Escape operate name editing. Up stops at the app's home boundary.
+| Component | Current responsibility |
+| --- | --- |
+| `userspace/apps/init/` | Installed launch authority, service progress and independent GUI generation supervision |
+| `userspace/apps/shell/` | Native wallpaper, theme, launch bar and authenticated Files/Notes launch requests |
+| `userspace/apps/files/` | Native Files model, pixel adapter and checked app-2 file operations |
+| `userspace/apps/notes/` | Native bounded ASCII editor and checked private app-108 load/Save |
+| `userspace/services/display-server/` | Retained composition, viewport epochs, focus, input and window chrome/cursor |
+| `userspace/services/window-server/` | Portable window/header geometry, controls, mode transitions and capture policy |
+| `userspace/runtime/` | Bedrock64 records, syscall wrappers and native desktop client/wire adapters |
+| Kernel display/resource brokers | Checked mappings, lifetime accounting, device input and final scanout |
 
-Dragging onto a Places folder, a list folder or the other split pane moves once
-on valid release. Ctrl at drag start or release selects copy. Invalid drops
-leave files unchanged. Double-click, Enter or Open displays a copied read-only
-preview of the first 512 bytes; Escape or Back closes it. Names and text input
-are ASCII in this first font/editor profile. Failures use plain messages;
-the application neither retries mutations nor silently replaces destinations.
-Ordinary Delete removes the namespace entry. The separate red
-“Nullify (overwrite + delete)” item is file-only and requires a matched menu
-release, with no extra confirmation or hotkey. Its protected syscall overwrites,
-flushes and exactly reads back both complete logical storage banks. Success
-shows “File nullified in Bedrock”; failure stays visibly incomplete and may
-require fresh-mount recovery. Matching preview/clipboard caches are cleared.
-SSD remapping, host backups and independent copies remain outside its scope.
-See [context menus and Nullify](context-menus-and-nullify.md) for the precise
-storage and authority contract.
+Public/private frameworks describe API support and distribution, not sandbox
+authority. `frameworks/private/` holds reusable internal mechanisms such as
+NetworkCore; application themes and views remain under userspace. Additional
+display/service frameworks should follow concrete object and IPC needs.
+Standalone input, launcher/file-picker brokers and a general service manager
+remain future work. Source paths need not mirror installed bundles.
 
-Modern VirtIO block and keyboard/tablet devices supply the reference QEMU paths
-on x86-64, ARM64 and RV64. The durable backend retains 32 nodes and 4,096 bytes
-per mutable file, with two CRC-protected snapshots on a dedicated 4 MiB image;
-live and staged snapshots remain in BSS. Bundles are immutable embedded overlays.
-See the [filesystem contract](persistent-filesystem.md) for commit ordering and
-fresh-mount recovery after uncertain I/O.
+## Retained surfaces and ownership
 
-The title bar moves the single window. Minimize preserves its live client state;
-Close returns to the trusted kernel continuation before releasing descriptors,
-context, private tables and payload frames. The host verifies that allocated
-pages return to the pre-launch baseline. The Files chip or Super+E restores a
-minimized window or launches a zeroed fresh client against the same disk.
+The compositor owns one full-screen scene and allocates GUI viewport caches
+lazily, one per accepted window within six registry slots. Its shell-bar cache
+is bounded private BSS. Incoming client snapshots use its RO/NX slot 0 only
+during copying. Each bound window retains one full-screen producer backing and
+paints its configured viewport at source 0 using full-screen row stride. This
+bounded desktop supports 800×600 through 1280×800. Balanced surface ownership is
+`2 + 2 * bound_gui_windows`: scene plus shell producer, then a producer/cache
+pair per window. Initial Files+Notes uses six; one tear-off uses eight; four
+Files windows plus Notes uses twelve without adding application processes.
 
-Maximize fills the work area; fullscreen fills the display and retains a
-32-pixel caption strip with an exit button. Restoring returns to the saved
-floating geometry or preceding mode. Geometry changes discard old queued
-coordinates, cancel pointer capture and request a native redraw event. Paint
-from obsolete dimensions is ignored. Redraw preserves selection, history,
-clipboard, edited names and preview state.
-Input routes only to the focused client, retaining pointer capture through a
-release outside client bounds. The client redraws on explicit model revisions.
-Automatic bindings/reconciliation, multiple windows, real tiling/workspace
-switching, a user-space compositor and GPU acceleration remain future work.
-The graphical path follows the existing boot checks; a desktop image does not
-replace them or establish the complete application sandbox.
+Creation returns a process-local generational surface capability. Submission
+revokes the producer's RW/NX mapping before authenticated IPC transfers a RO/NX
+snapshot. The compositor copies only the configured extent to the matching cache
+and releases its read mapping/grant. Current-frame ACKs follow composition and
+checked final presentation. A stale frame still receives its exact ACK after
+release, allowing the client to retire its old epoch and repaint.
 
-## Native desktop sequence
+One authenticated connection per app carries scoped u16 WindowIDs in the upper
+message flags. Files' Hub routes configure/input/ACK/close independently to four
+caller-owned session slots, with monotonic IDs never reused within the
+connection. Controls resolve through the authenticated app/PID and selected
+WindowID; they cannot target another app or gain authority from a copied ID.
+Configured size/origin and frame epoch are explicit. Old PIDs, duplicate sequences
+and obsolete layouts cannot update a visible cache. Minimize sends a 0×0 hidden
+viewport; restore requests a new visible epoch without allocating a new client
+surface. Closing hides the selected window; retirement releases its producer
+after leases settle, then its compositor cache. Snapshot references
+keep delivered pixels alive through owner retirement until the service releases
+them; backing and private mapping tables return after their final reference.
 
-1. Native AxisUI layout/rendering, shell composition, bounded input/state
-   primitives and a protected Files client are implemented. Their integrated
-   persistence/input/window verification passed on all three UEFI references
-   in Debug and ReleaseSafe. The compact Files and window-control extension is
-   recorded separately in [Files UI verification](files-ui-verification.md).
-   The newer menu/Nullify revision separately passed native/compile/UEFI checks
-   and all six Debug/ReleaseSafe QEMU workflows, including twelve independently
-   inspected logical banks and reboot absence, as recorded in
-   [the milestone record](context-menus-and-nullify.md).
-2. Move display ownership, input routing and window management into protected
-   service processes with checked surface IPC. Run the shell as a protected app
-   instead of through the kernel display host.
-3. Add installed bundle launching and multiple native app windows while retaining
-   per-app file, surface and input authority.
-4. Add event-driven state bindings and reconciliation so native view updates
-   preserve identity and do not require rebuilding unrelated state.
-5. Add native `.app` windows, launch, tiling, keyboard focus, workspaces and an
-   optional floating mode once process loading and display/input ownership work.
-6. Extend the current software wallpaper frost to independently composited app
-   surfaces, damage tracking and animation as the display services develop.
+Each peer has bounded pending ACK/configuration/close state and a 32-event input
+queue. Pointer moves coalesce; overflow sends explicit gesture cancellation
+before the latest event. A nonreading peer cannot block the compositor or
+the other peer. Init receives atomic heartbeat records containing peer
+PIDs, launch/close counters and frame/presentation progress. Only the trusted
+shell can request a launch; only init chooses and starts installed identities.
 
-The current [frosted materials](frosted-materials.md) sample a wallpaper cache;
-they do not capture other applications. The framework offers an integer-only
-blur and tint with caller-owned storage. Protected Files asks for material
-rectangles through a checked syscall, retaining its existing client bounds.
+The compositor builds wallpaper-only blur before bar, app or cursor pixels.
+Frost samples this immutable cache rather than capturing another application's
+content. Files builds its own public-wallpaper backdrop and samples it using its
+configured screen origin. Damage tracking, animation
+and GPU support remain separate rendering milestones.
 
-The current runtime desktop uses a software framebuffer renderer. It must not
-depend on GPU acceleration or advanced visual effects being available. Rendering
-mechanisms and driver support remain separate engineering milestones.
+The logical surface format is packed RGB. The kernel validates scanout bounds,
+framebuffer channel masks, stride and byte coverage for final presentation.
+Apps receive neither raw scanout authority nor another app's writable pixels.
 
-A native renderer must encode the handoff's explicit framebuffer color masks,
-respect scanline stride and byte coverage, and clip all drawing. Integer drawing
-keeps the current RV64 execution contract intact.
+## Files and sandbox authority
 
-A successful desktop startup replaces the graphical startup text. Failed startup
-checks stop before it; a renderer failure clears the display and reports its
-new fault through the diagnostic console. Existing serial smoke acceptance logs
-retain the full check output from those runs. Retaining the normal boot log and
-providing a diagnostic viewport remain future work.
+The [application model](application-model.md) keeps native installed bundles,
+private containers, immutable content and explicitly granted objects. Desktop
+appearance, window placement or linking AxisUI cannot grant extra filesystem,
+device, network or launch permissions.
 
-## App authority remains mandatory
+Files retains trusted app identity 2 and its `/container/Desktop`,
+`/container/Documents` and `/container/Downloads` data. Desktop is a real
+persistent directory and a navigation/drop target. Launch attempts to add it
+to existing Files containers without recreating sample files or replacing an
+existing item of the same name; provider errors remain subject to the normal
+checked navigation and mutation paths.
+Notes stores `/container/notes.txt` in its separate
+app-108 container; the same path root does not expose that data to Files.
+Shell is independently sandboxed as 107; the display
+service is 104. The compiled catalogue selects permissions and bounded ELF memory
+limits. An app cannot choose another app ID, gain rights through copied handles
+or opt out of its sandbox. Files has no direct raw-input or display-present
+authority; it submits its own pixels and receives app-local events.
 
-The [application model](application-model.md) stays unchanged: native `.app`
-bundles, private containers, read-only installed content, explicit shared runtime
-access and brokered object grants. There is no app sandbox opt-out or root bypass.
-Desktop appearance and window placement cannot grant extra filesystem, device,
-network or process authority.
+Modern VirtIO block/input devices supply the reference QEMU paths. The bounded
+durable backend keeps 32 nodes and 4096 bytes per mutable file in a dedicated
+two-bank 4 MiB image. Bundles remain immutable overlays. See the
+[persistent filesystem contract](persistent-filesystem.md) for commit ordering
+and recovery after uncertain I/O.
 
-A display-surface handle must authorize only its own surface, never another
-app's memory or content. The current host scopes Files drawing and focused input;
-future service processes must retain that policy. Launchers and file pickers
-remain brokers with explicit authority;
-they do not make requested entitlements into grants. These services and complete
-resource isolation remain future work, beyond the current bounded processes.
+## Profiles and acceptance
 
-## Acceptance boundaries
+`zig build desktop`, `zig build windows` and architecture-specific
+`desktop-<arch>` targets package the five installed programs. Normal
+`run-uefi-<arch>` and `run-desktop-<arch>` select this desktop.
+`test-window-desktop` exercises independent Files/Notes input, window controls,
+workspaces, tiling, persistence, fault recovery and teardown; F12 finishes its
+dedicated acceptance host while F11 remains actual fullscreen. See
+[native window desktop](window-desktop.md) for SDK and current limits.
 
-The current implementation covers native view layout, clipped pixel/command
-rendering, a protected Files ELF, durable private files and reference VirtIO
-input. Its [verification record](storage-and-files-verification.md) confirms
-fresh Debug/ReleaseSafe native checks, both 18-configuration boot matrices and
-six native desktop workflows: all three architectures in both modes, with two
-normal boots per workflow. Each checks startup authority, rename, drag move,
-held-Ctrl copy, delete, mkdir, create, preview, title drag and minimize/reopen.
-The first QEMU process is killed abruptly; independent CRC/generation/content
-and owner readback checks committed Files data before and after a fresh boot.
-This covers held-Ctrl interaction and latched client intent, not a total ordering
-guarantee for arbitrarily fast chords across independent input-device queues.
-Layout and renderer
-tests must cover constrained sizes, modifier behavior, framebuffer stride and
-color masks, clipped edges and untouched bytes outside the drawing bounds.
-QEMU acceptance must exercise actual input and mutations, valid/invalid drops,
-error presentation, minimize/reopen, and fresh-boot recovery of committed Files
-data after the existing boot workload. No physical hardware is validated by
-these checks.
+The preceding single-window [integrated gate](service-desktop-verification.md)
+passed on all three named UEFI QEMU profiles in Debug and ReleaseSafe: 24 boots verify actual rendered
+pixels, focused input, persistent mutations, close/relaunch with stable
+shell/server PIDs, capability denials, resource retirement and fresh-boot data
+recovery. Native tests additionally cover stale-frame and queue behavior.
+No physical machine has been qualified by these emulator checks.
 
-Before claiming the complete service-based desktop, the same native workflow
-must run on x86-64, ARM64 and RV64 UEFI: init starts the services, the launcher selects the correct
-native bundle executable, and input follows the focused app across workspace
-and layout changes. A failed app must leave the other apps and desktop service
-running. Desktop services must preserve the application's granted authority.
+The earlier `display`/`test-display` profile retains fixed 320×240 clients105/106
+and A fault/relaunch while B and the service survive. Its
+[verification record](protected-display-verification.md) applies to that demo.
+The legacy `test-desktop` regression retains the kernel-hosted Files adapter;
+[storage/input verification](storage-and-files-verification.md),
+[compact Files UI verification](files-ui-verification.md) and the
+[menu/Nullify record](context-menus-and-nullify.md) describe its completed gates.
+Those historical results do not substitute for the primary native window gate,
+or for a fresh integrated run of the typography and compact-header revision.
 
-Before claiming per-app composition, workloads must prove that one app cannot
-read or alter another app's surface or receive its input without an explicit
-grant. Animation and blur are subsequent rendering acceptance checks, not
-evidence of application isolation. See the [roadmap](roadmap.md) for the
-surrounding runtime milestones.
+The boot checks still precede graphical startup. A broader GUI catalogue,
+service recovery and general app installation require their own future
+workloads. See the [roadmap](roadmap.md) for the surrounding milestones.

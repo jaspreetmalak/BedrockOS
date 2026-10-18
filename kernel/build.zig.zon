@@ -11,6 +11,7 @@
         .window_server = .{ .path = "../userspace/services/window-server" },
         .networkkit = .{ .path = "../frameworks/public/NetworkKit" },
         .network_core = .{ .path = "../frameworks/private/NetworkCore" },
+        .anvil_core = .{ .path = "../frameworks/private/AnvilCore" },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" },
 }

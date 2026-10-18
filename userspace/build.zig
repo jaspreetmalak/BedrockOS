@@ -38,4 +38,19 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(programs.files);
     b.installArtifact(programs.network);
     b.installArtifact(programs.wifi);
+    b.installArtifact(programs.app_init);
+    b.installArtifact(programs.observer);
+    b.installArtifact(programs.worker);
+    b.installArtifact(programs.display_init);
+    b.installArtifact(programs.display_server);
+    b.installArtifact(programs.surface_client);
+    b.installArtifact(programs.desktop_init);
+    b.installArtifact(programs.desktop_server);
+    b.installArtifact(programs.desktop_shell);
+    b.installArtifact(programs.desktop_files);
+    b.installArtifact(programs.window_init);
+    b.installArtifact(programs.window_server);
+    b.installArtifact(programs.window_shell);
+    b.installArtifact(programs.window_files);
+    b.installArtifact(programs.window_notes);
 }

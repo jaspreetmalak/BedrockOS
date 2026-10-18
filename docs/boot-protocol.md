@@ -1,6 +1,6 @@
 # Draft Bedrock boot protocol
 
-The `boot-protocol` package is a shared data contract, draft major 0/minor 2,
+The `boot-protocol` package is a shared data contract, draft major 0/minor 6,
 not a frozen external ABI. Format and layout checks live in that package.
 
 ## Initial records
@@ -14,10 +14,13 @@ not a frozen external ABI. Format and layout checks live in that package.
   flags. It appends up to 64 sorted memory regions, typed console, boot environment,
   CPU entry state, ACPI/framebuffer descriptions and an owned raw EFI memory-map
   reference. Draft v0.2 adds CPU physical width and up to 64 explicit sparse
-  identity-mapping ranges. The current record is 2,816 bytes, aligned to 8 bytes.
+  identity-mapping ranges. Draft v0.3 appends a private Wi-Fi asset handoff;
+  v0.4 appends retained driver image records; v0.5 appends the installed-app
+  archive handoff; v0.6 appends an optional firmware wall-clock snapshot.
+  The current record is 4,136 bytes, aligned to 8 bytes.
   Its declared header size includes the complete record. The first 1,784 bytes
   retain every v0.1 field offset, including the original 120-byte prefix; current
-  full-record consumers still reject records shorter than 2,816 bytes.
+  full-record consumers still reject records shorter than 4,136 bytes.
 - `Console`: address, type, register stride, clock and baud rate. Supported kinds
   represent PL011, MMIO/I/O 16550, framebuffer and no console.
 - `Framebuffer`: checked 32-bit pixel geometry, stride, backing size and explicit
@@ -37,6 +40,61 @@ The appended v0.2 fields are `mapped_range_count: u32` at offset 1,784,
 report nonempty sorted disjoint identity coverage; reset profiles may retain
 zero coverage and their explicit platform mapping contract.
 
+Draft v0.3 appends `wifi: WifiBoot` at offset 2,816 (136 bytes), preserving all
+prior offsets. It holds version/flags, a page-aligned retained reservation,
+patch/RAM/optional profile ranges and a 64-byte EFI RNG seed. Present firmware
+must use the exact pinned lengths; assets are contained and disjoint inside a
+mapped, non-reclaimable reserved arena, outside loader/kernel/framebuffer
+reservations. All absent fields are zero. Flags independently describe firmware,
+entropy and profile availability. Kernel consumers retain a pointer to the
+original validated handoff; they consume/erase its seed and clear its entropy
+flag. The loader erases its temporary seed copy immediately after handoff.
+These fields describe acquired inputs; they never certify physical RF readiness.
+
+Draft v0.4 appends `drivers: DriverBoot` at offset 2,952 (1,096 bytes),
+preserving all prior offsets. It holds up to four 272-byte `DriverRecord`s.
+Each records the retained allocation, contained mapped image, executable entry,
+class, SHA-256 of the relocated image and up to eight page-disjoint segment
+ranges. ELF flags permit only R, RX and RW; executable pages cannot be writable.
+Entry lies inside an RX segment and respects ARM64/RISC-V instruction alignment.
+Unused records and segments are zero. Present modules are UEFI-only, completely
+mapped and covered by non-reclaimable reserved memory, disjoint from boot arenas,
+Wi-Fi assets, the framebuffer and other module reservations.
+
+The EFI loader inspects and relocates optional driver files without entering
+them. Kernel architecture code applies supervisor R/RX/RW-NX mappings, then the
+private broker checks the image digest and versioned Driver ABI before calling
+entry. Driver pages remain reserved for their lifetime; hot unload is not
+implemented. These records describe trusted executable code with kernel
+privileges, not an application sandbox. See private
+[DriverKit](../frameworks/private/DriverKit/README.md)
+and [package selection](driver-packages.md).
+
+Draft v0.5 appends `apps: AppBoot` at offset 4,048 (64 bytes), preserving all
+prior offsets. It records a page-aligned retained reservation, a contained
+archive extent and its SHA-256. The archive is at most 16 MiB; absent fields are
+all zero. Present archives are UEFI-only, completely mapped, non-reclaimable
+reserved memory and disjoint from loader/kernel, driver, Wi-Fi and framebuffer
+reservations. Kernel mappings keep archive pages supervisor-only, read-only and
+non-executable. The kernel checks the digest and archive before mounting
+app-owned bundles, and retains this reservation while the VFS borrows bytes.
+These records identify installed code bytes; they do not assign app permissions
+or certify a package signature. See [installed applications](application-runtime.md).
+
+Draft v0.6 appends `wall_clock: WallClock` at offset 4,112 (24 bytes), preserving
+every earlier offset. It records `seconds: i64`, `nanoseconds: u32`, `flags: u32`,
+`utc_offset_minutes: i32`, and a zero reserved word. The available and UTC flag
+bits are 1 and 2. Absent fields are completely zero; a present clock is UEFI-only.
+The loader reads `GetTime` before its final memory-map/key sequence and never
+calls firmware afterward. It validates calendar dates, leap years, fractions,
+timezone bounds and daylight flags. UTC seconds are Unix epoch seconds; the
+conventional offset is minutes east of UTC. Firmware with unspecified timezone
+retains local calendar seconds, offset 2047, and a clear UTC flag. No timezone
+or time is guessed. Dates normalized outside 1900–9999 become unavailable.
+The kernel advances this baseline through the existing observed timer quanta;
+this is an approximate clock rather than a synchronized time service. See
+[wall clock](wall-clock.md).
+
 The initial three profiles are 64-bit and little endian. Records have explicit
 extern layouts and compile-time size/offset checks. Callers must provide valid,
 aligned access to the header; field validation does not make an arbitrary raw
@@ -55,7 +113,7 @@ metadata, framebuffer bounds/masks, retained EFI metadata and sorted nonempty
 map regions. Loader/kernel reservations must be completely covered by nonusable
 regions. It does not prove that supplied ranges describe real hardware; platform
 startup must establish this separately. Explicit identity coverage must include
-the loader/kernel arenas, owned DTB, retained EFI map, framebuffer and any MMIO
+the loader/kernel arenas, driver, Wi-Fi and installed-app arenas, owned DTB, retained EFI map, framebuffer and any MMIO
 console ranges. `BootInfo.isMapped(range)` queries validated coverage; it returns
 false for unreported reset coverage rather than guessing a mapping.
 
@@ -98,7 +156,7 @@ and [ARM64/RV64 UEFI](arm64-riscv64-uefi.md) entry contracts.
 Broader platform support and kernel features will require:
 
 - Exact loader/module reclaim timing.
-- Kernel image ranges, initial archive/modules, and command line.
+- A general command line, broader executable/archive formats and driver classes.
 - Additional hardware descriptions, boot CPU identity and runtime services policy.
 - Required/optional extension handling and boot verification state.
 - Entry contracts for additional platforms, secondary CPU startup, and runtime

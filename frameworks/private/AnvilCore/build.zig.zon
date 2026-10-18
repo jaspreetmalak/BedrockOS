@@ -1,0 +1,1 @@
+.{ .name = .bedrock_anvil_core, .fingerprint = 0xcb3a78bb2b7ddafc, .version = "0.1.0", .minimum_zig_version = "0.17.0", .dependencies = .{ .anvil = .{ .path = "../../public/Anvil" } }, .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" } }

@@ -46,12 +46,12 @@ SECTIONS
     __kernel_allocated_end = .;
 
     /* The handoff reserves the whole [0x40200000, 0x40400000) range. */
-    __stack_bottom = 0x403f0000;
+    __stack_bottom = 0x403e0000;
     __stack_top = 0x40400000;
 
     ASSERT(__kernel_image_start == 0x40200000, "kernel load address changed")
     ASSERT(_start == __kernel_image_start, "kernel entry must be the first initialized byte")
-    ASSERT(__kernel_allocated_end <= __stack_bottom, "kernel sections overlap the 64 KiB stack")
+    ASSERT(__kernel_allocated_end <= __stack_bottom, "kernel sections overlap the 128 KiB stack")
     ASSERT((__bss_start & 7) == 0 && (__bss_end & 7) == 0, "BSS must permit 64-bit clearing")
     ASSERT((bedrock_exception_vectors & 0x7ff) == 0, "VBAR_EL1 table must be 2 KiB aligned")
 

@@ -42,7 +42,7 @@ SECTIONS
         __bss_end = .;
     } :data
     __kernel_allocated_end = .;
-    __stack_bottom = 0x803f0000;
+    __stack_bottom = 0x803e0000;
     __stack_top = 0x80400000;
 
     /DISCARD/ :

@@ -23,10 +23,15 @@ const supervisor_rw = valid | read | write | accessed | dirty;
 const supervisor_rx = valid | read | execute | accessed;
 const supervisor_ro = valid | read | accessed;
 
+fn userFlags(mapping: contract.Mapping) u64 {
+    return supervisor_ro | user | (if (mapping.writable) write | dirty else @as(u64, 0)) |
+        (if (mapping.executable) execute else @as(u64, 0));
+}
+
 var ready = false;
 var running = false;
 var running_task: contract.TaskMemory = undefined;
-var boot_info: protocol.BootInfo = undefined;
+var boot_info: *const protocol.BootInfo = undefined;
 var kernel_layout: contract.KernelLayout = undefined;
 var kernel_root: u64 = 0;
 var kernel_tables: Tables = undefined;
@@ -65,6 +70,8 @@ const Space = struct {
     generation: u64 = 0,
     live: bool = false,
     task: contract.TaskMemory = undefined,
+    shared: [contract.shared_surface_slots]contract.SharedMapping = @splat(.{}),
+    shared_tables: [contract.shared_surface_slots][2]u64 = @splat(@splat(0)),
 };
 
 comptime {
@@ -236,7 +243,7 @@ fn lookup(root: u64, virtual_address: u64) ?Translation {
     }
 }
 
-fn auditNode(root: u64, current: u64, level: u2, base: u64, task_memory: ?contract.TaskMemory) anyerror!void {
+fn auditNode(root: u64, current: u64, level: u2, base: u64, task_memory: ?contract.TaskMemory, shared: []const contract.SharedMapping) anyerror!void {
     const backing = lookup(root, current) orelse return error.PageTableNotAccessible;
     if (backing.address != current or (backing.flags & (read | write | execute | user)) != (read | write))
         return error.PageTableNotWritable;
@@ -245,7 +252,7 @@ fn auditNode(root: u64, current: u64, level: u2, base: u64, task_memory: ?contra
         const address = base + index * levelSize(level);
         if ((pte & leaf_bits) == 0) {
             if (level == 0 or (pte & 0x3ff) != valid) return error.InvalidPageTable;
-            try auditNode(root, physical(pte), level - 1, address, task_memory);
+            try auditNode(root, physical(pte), level - 1, address, task_memory, shared);
             continue;
         }
         if ((pte & write) != 0 and (pte & read) == 0 or
@@ -258,10 +265,8 @@ fn auditNode(root: u64, current: u64, level: u2, base: u64, task_memory: ?contra
         const task = task_memory orelse return error.UnexpectedUserMapping;
         if (level != 0) return error.UserHugePage;
         const Expected = struct { physical_address: u64, flags: u64 };
-        const mapping = for (task.mappings()) |range| {
-            if (address >= range.virtual and address - range.virtual < @as(u64, range.pages) * page_size) break range;
-        } else return error.UnexpectedUserMapping;
-        const expected: Expected = .{ .physical_address = mapping.physical + address - mapping.virtual, .flags = read | user | (if (mapping.writable) write else execute) };
+        const mapping = contract.userMapping(task, shared, address) orelse return error.UnexpectedUserMapping;
+        const expected: Expected = .{ .physical_address = mapping.physical + address - mapping.virtual, .flags = userFlags(mapping) & (read | write | execute | user) };
         if (physical(pte) != expected.physical_address or (pte & (read | write | execute | user)) != expected.flags)
             return error.InvalidUserPermissions;
     }
@@ -276,26 +281,39 @@ fn auditRange(root: u64, start: u64, end: u64, flags: u64) !void {
     }
 }
 
-fn audit(tables: *const Tables, task_memory: ?contract.TaskMemory) !void {
-    try auditNode(tables.root, tables.root, 2, 0, task_memory);
+fn audit(tables: *const Tables, task_memory: ?contract.TaskMemory, shared: []const contract.SharedMapping) !void {
+    try auditNode(tables.root, tables.root, 2, 0, task_memory, shared);
     try auditRange(tables.root, kernel_layout.text_start, kernel_layout.text_end, read | execute);
     try auditRange(tables.root, kernel_layout.rodata_start, kernel_layout.rodata_end, read);
     try auditRange(tables.root, kernel_layout.data_start, kernel_layout.data_end, read | write);
+    if (boot_info.apps.reservation.length != 0)
+        try auditRange(tables.root, boot_info.apps.reservation.base, try boot_info.apps.reservation.endExclusive(), read);
+    for (boot_info.drivers.records[0..boot_info.drivers.count]) |driver|
+        for (driver.segments[0..driver.segment_count]) |segment|
+            try auditRange(tables.root, segment.range.base, try segment.range.endExclusive(), read | (if (segment.flags & 2 != 0) write else @as(u64, 0)) | (if (segment.flags & 1 != 0) execute else @as(u64, 0)));
     try auditRange(tables.root, kernel_layout.stack_bottom, kernel_layout.stack_top, read | write);
     if (lookup(tables.root, kernel_layout.stack_guard) != null or lookup(tables.root, trap_guard) != null or
         lookup(tables.root, contract.user_guard) != null or lookup(tables.root, 0) != null)
         return error.GuardPageMapped;
     if (task_memory) |task| {
         if (lookup(tables.root, task.guard()) != null) return error.GuardPageMapped;
-        for (task.mappings()) |mapping| {
+        for (task.allMappings()) |mapping| {
             for (0..mapping.pages) |index| {
                 const address = mapping.physical + index * page_size;
                 const alias = lookup(tables.root, address) orelse return error.PrivateBackingNotAccessible;
                 if (alias.address != address or (alias.flags & (user | execute)) != 0)
                     return error.PrivatePhysicalAliasExposed;
                 const leaf = lookup(tables.root, mapping.virtual + index * page_size) orelse return error.UserMappingMissing;
-                const expected = read | user | (if (mapping.writable) write else execute);
+                const expected = userFlags(mapping) & (read | write | execute | user);
                 if (leaf.address != address or leaf.flags & (read | write | execute | user) != expected) return error.InvalidUserPermissions;
+            }
+        }
+        for (shared, 0..) |record, slot| {
+            if (record.pages == 0) continue;
+            const mapping = try record.mapping(slot);
+            for (0..mapping.pages) |index| {
+                const leaf = lookup(tables.root, mapping.virtual + index * page_size) orelse return error.UserMappingMissing;
+                if (leaf.address != mapping.physical + index * page_size or leaf.flags & (read | write | execute | user) != userFlags(mapping) & (read | write | execute | user)) return error.InvalidUserPermissions;
             }
         }
     }
@@ -309,6 +327,11 @@ fn makeKernelMappings(tables: *Tables, limit: usize) !void {
     try tables.mapLeaf(0x100000, 0x100000, 0, supervisor_rw);
     try tables.protect(kernel_layout.text_start, kernel_layout.text_end, supervisor_rx);
     try tables.protect(kernel_layout.rodata_start, kernel_layout.rodata_end, supervisor_ro);
+    if (boot_info.apps.reservation.length != 0)
+        try tables.protect(boot_info.apps.reservation.base, try boot_info.apps.reservation.endExclusive(), supervisor_ro);
+    for (boot_info.drivers.records[0..boot_info.drivers.count]) |driver|
+        for (driver.segments[0..driver.segment_count]) |segment|
+            try tables.protect(segment.range.base, try segment.range.endExclusive(), if (segment.flags & 1 != 0) supervisor_rx else if (segment.flags & 2 != 0) supervisor_rw else supervisor_ro);
     try tables.unmap(kernel_layout.stack_guard);
     try tables.unmap(trap_guard);
 }
@@ -343,6 +366,7 @@ pub fn prepare(info: *const protocol.BootInfo, layout: contract.KernelLayout) !v
         readSatp() != 0) return error.UnexpectedSupervisorEntry;
     if ((readStatus() & ((1 << 18) | (1 << 19) | (1 << 1))) != 0)
         return error.UnexpectedSupervisorStatus;
+    try contract.validateKernelStack(layout);
     for ([_]u64{ layout.kernel_start, layout.text_start, layout.text_end, layout.rodata_start, layout.rodata_end, layout.data_start, layout.data_end, layout.allocated_end, layout.stack_bottom, layout.stack_top, layout.stack_guard }) |address| {
         if (address >= identity_limit or address % page_size != 0) return error.InvalidKernelLayout;
     }
@@ -360,12 +384,12 @@ pub fn prepare(info: *const protocol.BootInfo, layout: contract.KernelLayout) !v
     }
     if (!info.isMapped(.{ .base = layout.kernel_start, .length = layout.allocated_end - layout.kernel_start }))
         return error.KernelNotAccessible;
-    boot_info = info.*;
+    boot_info = info;
     kernel_layout = layout;
     const allocator = memory.allocator() orelse return error.MemoryNotInitialized;
-    // A guarded, kernel-owned 64 KiB dispatcher stack. The cooperative probes
+    // A guarded, kernel-owned 128 KiB dispatcher stack. The cooperative probes
     // are serialized; no user token can select or modify this stack.
-    const stack = (try allocator.allocateContiguous(17, 1)) orelse return error.OutOfMemory;
+    const stack = (try allocator.allocateContiguous(contract.kernel_dispatch_stack_pages + 1, 1)) orelse return error.OutOfMemory;
     errdefer {
         allocator.releaseContiguous(stack) catch @panic("RV64 trap-stack ownership corrupted");
         trap_guard = 0;
@@ -383,7 +407,7 @@ pub fn prepare(info: *const protocol.BootInfo, layout: contract.KernelLayout) !v
         kernel_tables.release();
         kernel_root = 0;
     }
-    try audit(&kernel_tables, null);
+    try audit(&kernel_tables, null, &.{});
     kernel_root = kernel_tables.root;
     publish();
     const value = satpFor(kernel_root);
@@ -410,9 +434,12 @@ pub fn createWithTableLimit(task_memory: contract.TaskMemory, table_limit: usize
         if (!candidate.live) break candidate;
     } else return error.AddressSpaceCapacity;
     try task_memory.validate();
-    for (task_memory.mappings()) |mapping| {
+    for (task_memory.allMappings()) |mapping| {
+        if (mapping.pages == 0) continue;
         const range: protocol.PhysicalRange = .{ .base = mapping.physical, .length = @as(u64, mapping.pages) * page_size };
         if (try range.endExclusive() > identity_limit or !boot_info.isMapped(range)) return error.InvalidTaskMemory;
+        if (boot_info.apps.reservation.length != 0 and range.base < try boot_info.apps.reservation.endExclusive() and
+            boot_info.apps.reservation.base < try range.endExclusive()) return error.AppArchiveCannotBackUserMemory;
         for (0..mapping.pages) |offset| {
             const address = mapping.physical + offset * page_size;
             const alias = lookup(kernel_root, address) orelse return error.PrivateBackingNotAccessible;
@@ -420,13 +447,15 @@ pub fn createWithTableLimit(task_memory: contract.TaskMemory, table_limit: usize
         }
     }
     const tables = &slot.tables;
+    slot.shared = @splat(.{});
+    slot.shared_tables = @splat(@splat(0));
     try makeKernelMappings(tables, table_limit);
     errdefer tables.release();
-    for (task_memory.mappings()) |mapping| {
-        for (0..mapping.pages) |offset| try tables.mapLeaf(mapping.virtual + offset * page_size, mapping.physical + offset * page_size, 0, (if (mapping.writable) supervisor_rw else supervisor_rx) | user);
+    for (task_memory.allMappings()) |mapping| {
+        for (0..mapping.pages) |offset| try tables.mapLeaf(mapping.virtual + offset * page_size, mapping.physical + offset * page_size, 0, userFlags(mapping));
     }
     try tables.unmap(task_memory.guard());
-    try audit(tables, task_memory);
+    try audit(tables, task_memory, &slot.shared);
     publish();
     slot.generation = next_space_generation;
     slot.task = task_memory;
@@ -447,7 +476,7 @@ pub fn run(space: contract.AddressSpace, invocation: contract.Invocation) void {
         invocation.entry != contract.user_code or invocation.user_sp != contract.user_stack_top)
         @panic("Invalid RV64 user transition");
     const owned = findSpace(space) orelse @panic("Unknown RV64 address space");
-    if (owned.task.desktop) @panic("RV64 cooperative fixture needs fixture layout");
+    if (owned.task.desktop or owned.task.app) @panic("RV64 cooperative fixture needs fixture layout");
     running_task = owned.task;
     running = true;
     bedrock_riscv_isolation_enter(invocation.entry, invocation.user_sp, trap_stack_top, satpFor(space.root), invocation.arg0, invocation.arg1, invocation.arg2);
@@ -468,6 +497,112 @@ fn findSpace(space: contract.AddressSpace) ?*Space {
     return null;
 }
 
+fn sharedReady() !void {
+    if (!ready or running or current_context != null or readStatus() & (1 << 1) != 0 or readSatp() != satpFor(kernel_root))
+        return error.InvalidAddressSpaceState;
+}
+fn ownsTable(tables: *const Tables, address: u64) bool {
+    for (tables.pages[0..tables.count]) |owned| if (owned == address) return true;
+    return false;
+}
+fn sharedBacking(address: u64, pages: u16) !void {
+    try contract.validateSharedBacking(boot_info, address, pages);
+    const allocator = memory.allocator() orelse return error.MemoryNotInitialized;
+    try contract.validateSharedAllocation(allocator, address, pages);
+    const bytes = @as(u64, pages) * page_size;
+    if (address + bytes > identity_limit or contract.physicalOverlap(address, bytes, trap_guard, (contract.kernel_dispatch_stack_pages + 1) * page_size)) return error.ProtectedSharedBacking;
+    for (kernel_tables.pages[0..kernel_tables.count]) |physical_address|
+        if (contract.physicalOverlap(address, bytes, physical_address, page_size)) return error.ProtectedSharedBacking;
+    for (&spaces) |*candidate| {
+        if (!candidate.live) continue;
+        for (candidate.tables.pages[0..candidate.tables.count]) |physical_address|
+            if (contract.physicalOverlap(address, bytes, physical_address, page_size)) return error.ProtectedSharedBacking;
+        for (candidate.task.allMappings()) |mapping|
+            if (contract.physicalOverlap(address, bytes, mapping.physical, @as(u64, mapping.pages) * page_size)) return error.ProtectedSharedBacking;
+    }
+    for (0..pages) |index| {
+        const physical_address = address + index * page_size;
+        const alias = lookup(kernel_root, physical_address) orelse return error.InvalidSharedBacking;
+        if (alias.address != physical_address or alias.flags & (user | execute | read | write) != read | write) return error.InvalidSharedPhysicalAlias;
+    }
+}
+fn sharedDirectory(owned: *const Space) !*[512]u64 {
+    const pointer = table(owned.tables.root)[indexFor(contract.user_base, 2)];
+    if (pointer & (valid | leaf_bits) != valid or !ownsTable(&owned.tables, physical(pointer))) return error.InvalidPageTable;
+    return table(physical(pointer));
+}
+fn releaseSharedTable(owned: *Space, address: u64) !void {
+    const index = for (owned.tables.pages[0..owned.tables.count], 0..) |value, at| {
+        if (value == address and at != 0) break at;
+    } else return error.InvalidPageTable;
+    try memory.allocator().?.release(address);
+    std.mem.copyForwards(u64, owned.tables.pages[index .. owned.tables.count - 1], owned.tables.pages[index + 1 .. owned.tables.count]);
+    owned.tables.count -= 1;
+    owned.tables.pages[owned.tables.count] = 0;
+}
+
+pub fn mapShared(space: contract.AddressSpace, slot: usize, physical_address: u64, pages: u16, writable_mapping: bool) !void {
+    try sharedReady();
+    const record = try contract.SharedMapping.init(slot, physical_address, pages, writable_mapping);
+    const mapping = try record.mapping(slot);
+    const owned = findSpace(space) orelse return error.UnknownAddressSpace;
+    if (owned.shared[slot].pages != 0) return error.SharedSlotOccupied;
+    try sharedBacking(physical_address, pages);
+    const directory = try sharedDirectory(owned);
+    const first = indexFor(mapping.virtual, 1);
+    const needed: usize = if (pages > 512) 2 else 1;
+    if (owned.tables.count + needed > owned.tables.limit) return error.PageTableCapacity;
+    for (0..needed) |index| if (directory[first + index] != 0) return error.SharedWindowAlreadyMapped;
+    const checkpoint = owned.tables.count;
+    var allocated: [2]u64 = @splat(0);
+    var published = false;
+    errdefer {
+        if (published) {
+            for (0..needed) |index| directory[first + index] = 0;
+            owned.shared[slot] = .{};
+            owned.shared_tables[slot] = @splat(0);
+        }
+        asm volatile ("fence rw, rw\nsfence.vma" ::: .{ .memory = true });
+        while (owned.tables.count > checkpoint) {
+            owned.tables.count -= 1;
+            memory.allocator().?.release(owned.tables.pages[owned.tables.count]) catch @panic("RV64 shared table rollback");
+            owned.tables.pages[owned.tables.count] = 0;
+        }
+    }
+    for (0..needed) |index| allocated[index] = try owned.tables.allocate();
+    for (0..pages) |index|
+        table(allocated[index / 512])[index % 512] = ((physical_address + index * page_size) >> 12) << 10 | userFlags(mapping);
+    for (allocated[0..needed], 0..) |address, index| directory[first + index] = (address >> 12) << 10 | valid;
+    owned.shared[slot] = record;
+    owned.shared_tables[slot] = allocated;
+    published = true;
+    try audit(&owned.tables, owned.task, &owned.shared);
+    publish();
+    asm volatile ("sfence.vma" ::: .{ .memory = true });
+}
+
+pub fn unmapShared(space: contract.AddressSpace, slot: usize) !void {
+    try sharedReady();
+    if (slot >= contract.shared_surface_slots) return error.InvalidSharedMapping;
+    const owned = findSpace(space) orelse return error.UnknownAddressSpace;
+    const record = owned.shared[slot];
+    if (record.pages == 0) return error.SharedSlotEmpty;
+    const mapping = try record.mapping(slot);
+    const directory = try sharedDirectory(owned);
+    const first = indexFor(mapping.virtual, 1);
+    const allocated = owned.shared_tables[slot];
+    const needed: usize = if (record.pages > 512) 2 else 1;
+    try audit(&owned.tables, owned.task, &owned.shared);
+    for (allocated[0..needed], 0..) |address, index|
+        if (!ownsTable(&owned.tables, address) or directory[first + index] != (address >> 12) << 10 | valid) return error.InvalidPageTable;
+    for (0..needed) |index| directory[first + index] = 0;
+    owned.shared[slot] = .{};
+    owned.shared_tables[slot] = @splat(0);
+    asm volatile ("fence rw, rw\nsfence.vma" ::: .{ .memory = true });
+    for (allocated[0..needed]) |address| try releaseSharedTable(owned, address);
+    try audit(&owned.tables, owned.task, &owned.shared);
+}
+
 /// Saved contexts must be destroyed before their address-space tables. This
 /// leaves the core-owned code/data/stack frames available for separate cleanup.
 pub fn destroy(space: contract.AddressSpace) !void {
@@ -476,6 +611,7 @@ pub fn destroy(space: contract.AddressSpace) !void {
     if (readSatp() != satpFor(kernel_root) or readSatp() == satpFor(space.root))
         return error.ActiveAddressSpace;
     const owned = findSpace(space) orelse return error.UnknownAddressSpace;
+    for (owned.shared) |record| if (record.pages != 0) return error.AddressSpaceHasSharedMappings;
     for (&contexts) |*context| {
         if (context.state != .free and context.state != .retired and
             context.space.root == space.root and context.space.generation == space.generation)

@@ -189,7 +189,7 @@ pub fn discover(info: *const protocol.BootInfo) !Devices {
 fn mmioDiscover(info: *const protocol.BootInfo, devices: *Devices, base: u64, stride: u64, count: usize) !void {
     for (0..count) |slot| {
         const address = base + slot * stride;
-        if (!info.isMapped(.{ .base = address, .length = 0x200 })) return error.UnmappedVirtioRegisters;
+        try validateRegisterRange(info, .{ .base = address, .length = 0x200 });
         if (io.read(u32, address) != 0x74726976) return error.InvalidVirtioMagic;
         const id = io.read(u32, address + 8);
         if (id == 0) continue;
@@ -213,6 +213,17 @@ fn pciWrite(address: u32, offset: u8, value: u32) void {
 
 const Capability = struct { base: u64 = 0, length: u64 = 0, multiplier: u32 = 0 };
 
+/// Mapped bytes are not necessarily device registers. In particular, the
+/// retained app archive must never become a writable transport register view.
+/// Both discovery paths check this before accessing the register aperture.
+fn validateRegisterRange(info: *const protocol.BootInfo, range: protocol.PhysicalRange) !void {
+    const end = try range.endExclusive();
+    if (range.length == 0 or !info.isMapped(range)) return error.UnmappedVirtioRegisters;
+    const archive = info.apps.reservation;
+    if (archive.length != 0 and range.base < try archive.endExclusive() and archive.base < end)
+        return error.ProtectedMemoryAlias;
+}
+
 fn memoryBarBase(bar: u8, low: u32, high: u32) !u64 {
     if (bar > 5 or low & 1 != 0) return error.InvalidPciBar;
     const base: u64 = switch ((low >> 1) & 3) {
@@ -234,7 +245,7 @@ fn capability(info: *const protocol.BootInfo, function: u32, offset: u8, length:
     const base = try memoryBarBase(bar, low, high);
     const result = try std.math.add(u64, base, pciRead(function, offset + 8));
     const bytes = pciRead(function, offset + 12);
-    if (bytes == 0 or !info.isMapped(.{ .base = result, .length = bytes })) return error.UnmappedVirtioRegisters;
+    try validateRegisterRange(info, .{ .base = result, .length = bytes });
     return .{ .base = result, .length = bytes, .multiplier = if (length >= 20) pciRead(function, offset + 16) else 0 };
 }
 
@@ -248,6 +259,24 @@ test "PCI memory BAR combines high address before checking assignment" {
     try std.testing.expectError(error.InvalidPciBar, memoryBarBase(0, 0x3f9, 0));
     try std.testing.expectError(error.InvalidPciBar, memoryBarBase(0, 0xc000_0002, 0));
     try std.testing.expectError(error.InvalidPciBar, memoryBarBase(0, 0xc000_0006, 0));
+}
+
+test "VirtIO register apertures reject retained app aliases before any native access" {
+    var info: protocol.BootInfo = undefined;
+    info.apps = .{ .reservation = .{ .base = 0x200000, .length = 0x20000 } };
+    info.mapped_range_count = 1;
+    info.mapped_ranges[0] = .{ .base = 0x100000, .length = 0x300000 };
+    for ([_]protocol.PhysicalRange{
+        .{ .base = 0x200000, .length = 0x200 },
+        .{ .base = 0x21ff00, .length = 0x200 },
+        .{ .base = 0x1ff000, .length = 0x21000 },
+    }) |range| try std.testing.expectError(error.ProtectedMemoryAlias, validateRegisterRange(&info, range));
+    try validateRegisterRange(&info, .{ .base = 0x220000, .length = 0x200 });
+    try validateRegisterRange(&info, .{ .base = 0x1ffe00, .length = 0x200 });
+    try std.testing.expectError(error.UnmappedVirtioRegisters, validateRegisterRange(&info, .{ .base = 0x400000, .length = 0x200 }));
+    try std.testing.expectError(error.UnmappedVirtioRegisters, validateRegisterRange(&info, .{ .base = 0x220000, .length = 0 }));
+    info.apps.reservation = .{ .base = 0xfffffffffffff000, .length = 0x2000 };
+    try std.testing.expectError(error.PhysicalRangeOverflow, validateRegisterRange(&info, .{ .base = 0x220000, .length = 0x200 }));
 }
 
 fn pciTransport(info: *const protocol.BootInfo, function: u32, id: u32) !Transport {

@@ -20,6 +20,12 @@ const network_requests = @import("network_syscalls.zig").Live;
 const wifi = @import("wifi_runtime.zig");
 const wifi_requests = @import("wifi_syscalls.zig").Live;
 const kernel_options = @import("kernel_options");
+const app_policy = @import("application_policy.zig");
+const app_bundles = @import("app_bundles");
+const display_requests = @import("display_syscalls.zig");
+const WallClock = @import("wall_clock.zig").Clock;
+const clock_requests = @import("clock_syscalls.zig");
+var wall_clock: WallClock = .{};
 const capacity = 8;
 comptime {
     if (elf.code_address != abi.code or elf.data_address != abi.data or elf.page_size != abi.page_size or
@@ -27,12 +33,12 @@ comptime {
         @compileError("ELF, syscall ABI and architecture mapping windows must agree");
 }
 const Pid = policy.Pid;
-const FrameOwner = memory.ownership.Owner(3);
-const Grants = security.handles.GenerationTable(8, 0x3fff_ffff);
+const FrameOwner = memory.ownership.Owner(5);
+const Grants = display_requests.Grants;
 const Files = vfs.Files(8);
 const PipeDescriptors = pipe.Descriptors(8);
 const Path = struct { bytes: [vfs.max_path]u8 = undefined, length: usize = 0 };
-const Spawn = struct { path: Path, image_id: u64 = 0, argument: u64 = 0, grant: ?security.handles.Grant = null, pipe_grant: ?pipe.Grant = null };
+const Spawn = struct { path: Path, image_id: u64 = 0, argument: u64 = 0, grant: ?security.handles.Grant = null, pipe_grant: ?pipe.Grant = null, package_id: u64 = 0 };
 const Pending = union(enum) {
     none,
     spawn: Spawn,
@@ -41,9 +47,11 @@ const Pending = union(enum) {
     sleep: u64,
     send: struct { object: u64, length: usize, data: [abi.max_payload]u8 },
     receive: struct { object: u64, address: u64, capacity: usize },
+    display: struct { number: u64, arg0: u64, arg1: u64, arg2: u64 },
 };
 const Native = struct {
     live: bool = false,
+    pid: Pid = undefined,
     owner: FrameOwner = undefined,
     frames: contract.TaskMemory = undefined,
     space: contract.AddressSpace = undefined,
@@ -54,6 +62,8 @@ const Native = struct {
     files: Files = undefined,
     pipes: PipeDescriptors = .{},
     pending: Pending = .none,
+    startup_read: bool = false,
+    shared: [contract.shared_surface_slots]display_requests.Shared = @splat(.{}),
 };
 const Channel = struct { id: u64 = 0, owner: Pid = undefined, references: usize = 0 };
 var processes: policy.ProcessTable(capacity) = .{};
@@ -65,7 +75,8 @@ const storage = &disk_runtime.storage;
 var pipes: pipe.Pipes(4, 256) = .{};
 // One retained budget shared by init's app tree, rather than copied allowances.
 // Payload pages are charged; private translation-table/kernel overhead is not.
-var budget = security.quotas.Budget.init(.{ .memory_pages = 27, .processes = 8, .handles = 64, .ipc_bytes = 1024 });
+var budget = security.quotas.Budget.init(.{ .memory_pages = if (kernel_options.window_runtime) 16384 else if (kernel_options.display_runtime) 8192 else if (kernel_options.app_runtime) 256 else 27, .processes = 8, .handles = 64, .ipc_bytes = if (kernel_options.display_runtime) 8192 else 1024 });
+var display: display_requests.Manager = .{};
 var selected: ?Pid = null;
 var active = false;
 var has_run = false;
@@ -81,6 +92,26 @@ var reports: u64 = 0;
 var exec_replacements: u64 = 0;
 var file_operations: u64 = 0;
 var pipe_operations: u64 = 0;
+var installed_ready = false;
+var session_teardown = false;
+var observer_pid: ?Pid = null;
+var observer_starts: usize = 0;
+var worker_starts: usize = 0;
+var worker_reaped: usize = 0;
+var worker_baseline: ?u64 = null;
+var worker_handles_baseline: ?u64 = null;
+var worker_memory_baseline: ?u64 = null;
+var observer_ticks: u64 = 0;
+var display_server_starts: usize = 0;
+var display_client_a_starts: usize = 0;
+var display_client_b_starts: usize = 0;
+var display_client_a_exits: usize = 0;
+var display_ready_frames_b: u64 = 0;
+var desktop_shell_starts: usize = 0;
+var desktop_files_starts: usize = 0;
+var desktop_files_exits: usize = 0;
+var window_notes_starts: usize = 0;
+var window_notes_exits: usize = 0;
 
 pub fn isActive() bool {
     return active;
@@ -89,12 +120,24 @@ pub fn isActive() bool {
 pub fn run(comptime console: type, info: *const protocol.BootInfo) !void {
     if (has_run) return error.ProcessRuntimeAlreadyInitialized;
     has_run = true;
+    wall_clock = try WallClock.init(info.wall_clock, processes.ticks);
     write_console = &struct {
         fn write(bytes: []const u8) void {
             console.write(bytes);
         }
     }.write;
-    try disk_runtime.initialize(console, info);
+    if (info.wall_clock.flags == 0) {
+        console.write("[kernel] wall clock unavailable\n");
+    } else {
+        console.write("[kernel] wall clock epoch/offset/flags=");
+        console.writeHex(@bitCast(info.wall_clock.seconds));
+        console.write(" ");
+        console.writeHex(@as(u64, @bitCast(@as(i64, info.wall_clock.utc_offset_minutes))));
+        console.write(" ");
+        console.writeHex(info.wall_clock.flags);
+        console.write("\n");
+    }
+    try disk_runtime.initializeWithInput(console, info, kernel_options.display_runtime);
     try network.initialize(info);
     try wifi.initialize(info, 0);
     for (wifi.inventory().candidates[0..wifi.inventory().count]) |candidate| {
@@ -104,13 +147,21 @@ pub fn run(comptime console: type, info: *const protocol.BootInfo) !void {
         console.writeHex(candidate.device.product);
         console.write(" ");
         console.writeHex(candidate.device.bdf.bus);
-        console.write("; operational driver unavailable\n");
+        console.write("\n");
     }
+    const wifi_boot = wifi.bootReport();
+    if (wifi_boot.error_length != 0) {
+        console.write("[kernel] driver module: ");
+        console.write(wifi_boot.error_text[0..@min(wifi_boot.error_length, wifi_boot.error_text.len)]);
+        console.write("\n");
+    }
+    if (info.drivers.count == 0 and !kernel_options.wifi_acceptance) console.write("[kernel] Wi-Fi driver module absent; radio unavailable\n");
     if (kernel_options.wifi_acceptance) console.write("[kernel] Wi-Fi simulated test radio active\n");
     if (kernel_options.wifi_absence_probe) console.write("[kernel] Wi-Fi physical driver unavailable\n");
     if (network.isAvailable()) console.write("[kernel] network device ready\n");
     const pages = memory.allocator() orelse return error.MemoryNotInitialized;
     const baseline = pages.stats();
+    if (kernel_options.app_runtime) return runInstalled(console, info, baseline.free_pages, baseline.allocated_pages);
     const permission = security.sandbox.bit(.ipc_service) | (if (kernel_options.network_echo_port != 0) security.sandbox.bit(.network_client) else @as(u32, 0)) |
         (if (kernel_options.wifi_acceptance) security.sandbox.bit(.wifi_control) | security.sandbox.bit(.wifi_observe) else if (kernel_options.wifi_absence_probe) security.sandbox.bit(.wifi_observe) else @as(u32, 0));
     // Installed app identities are stable across boots; frame-owner tickets are
@@ -207,6 +258,131 @@ pub fn run(comptime console: type, info: *const protocol.BootInfo) !void {
     console.write("[kernel] native process lifecycle verified\n[kernel] blocking wait verified\n[kernel] sleep wakeup verified\n[kernel] cooperative sleep progress verified\n[kernel] capability IPC verified\n[kernel] native process cleanup verified\n");
 }
 
+fn runInstalled(comptime console: type, info: *const protocol.BootInfo, baseline_free: u64, baseline_allocated: u64) !void {
+    const std = @import("std");
+    if (info.apps.archive.length == 0) return error.InstalledApplicationArchiveMissing;
+    const source: [*]const u8 = @ptrFromInt(info.apps.archive.base);
+    const bytes = source[0..@intCast(info.apps.archive.length)];
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    if (!std.crypto.timing_safe.eql([32]u8, digest, info.apps.sha256)) return error.InstalledArchiveChanged;
+    const archive = try app_bundles.inspect(bytes, switch (builtin.cpu.arch) {
+        .x86_64 => .x86_64,
+        .aarch64 => .aarch64,
+        .riscv64 => .riscv64,
+        else => unreachable,
+    });
+    if (archive.count != (if (kernel_options.window_runtime) @as(u32, 5) else if (kernel_options.display_runtime) @as(u32, 4) else @as(u32, 3))) return error.IncompleteInstalledCatalogue;
+    // Inspect every executable and bind its identity before exposing any VFS
+    // node. No archive field can grant a permission or widen memory limits.
+    for (0..archive.count) |index| {
+        const entry = archive.entry(index).?;
+        if (kernel_options.window_runtime) {
+            if (entry.app_id != app_policy.init_id and entry.app_id != app_policy.display_server_id and entry.app_id != app_policy.shell_id and entry.app_id != app_policy.files_id and entry.app_id != app_policy.notes_id) return error.InvalidInstalledIdentity;
+        } else if (kernel_options.desktop_runtime) {
+            if (entry.app_id != app_policy.init_id and entry.app_id != app_policy.display_server_id and entry.app_id != app_policy.shell_id and entry.app_id != app_policy.files_id) return error.InvalidInstalledIdentity;
+        } else if (kernel_options.display_runtime) {
+            if (entry.app_id != app_policy.init_id and entry.app_id != app_policy.display_server_id and entry.app_id != app_policy.surface_one_id and entry.app_id != app_policy.surface_two_id) return error.InvalidInstalledIdentity;
+        } else if (entry.app_id != app_policy.init_id and entry.app_id != app_policy.observer_id and entry.app_id != app_policy.worker_id) return error.InvalidInstalledIdentity;
+        try app_policy.validateIdentity(entry.app_id, entry.name, entry.path);
+        _ = try inspectInstalled(entry.bytes, try app_policy.lookup(entry.app_id));
+    }
+    for (0..archive.count) |index| {
+        const entry = archive.entry(index).?;
+        const profile = try (try app_policy.lookup(entry.app_id)).profile();
+        try storage.prepareContainer(profile.app_id);
+        try storage.mountBundle(profile, entry.path, entry.bytes, true);
+    }
+    if (kernel_options.display_runtime) try display.initialize(info, &budget, write_console);
+    const package = try app_policy.lookup(app_policy.init_id);
+    const init = try processes.spawn(null);
+    errdefer processes.abortSpawn(init) catch {};
+    try load(init, .{ .path = try pathFrom(package.path), .package_id = package.id }, try package.profile());
+    errdefer {
+        session_teardown = true;
+        processes.failInit(.{ .code = 99, .faulted = true }) catch {};
+        cleanupZombies() catch {};
+    }
+    active = true;
+    defer {
+        active = false;
+        selected = null;
+    }
+    console.write("[kernel] installed native init ready; persistent supervisor\n");
+    var turns: usize = 0;
+    while (true) {
+        if (try processes.state(init) == .zombie) return error.PersistentInitExited;
+        if (kernel_options.app_acceptance) {
+            turns += 1;
+            if (turns > (if (kernel_options.desktop_runtime) @as(usize, 500000) else @as(usize, 50000))) return error.InstalledRuntimeTimeout;
+        }
+        network.poll();
+        wifi.poll(processes.ticks);
+        try finishKernelRequests();
+        if (try processes.dispatch()) |pid| {
+            const task = &native[try processes.slot(pid)];
+            if (!task.live or task.pending != .none) return error.ProcessDispatchedBeforeCompletion;
+            selected = pid;
+            arch.validateContext(task.context) catch {
+                selected = null;
+                try failProcess(pid);
+                try cleanupZombies();
+                continue;
+            };
+            arch.resumeContext(task.context);
+            selected = null;
+            try cleanupZombies();
+        } else {
+            try arch.idleUntilTick();
+            idle_ticks += 1;
+            try processes.advanceTicks(1);
+        }
+        if (kernel_options.app_acceptance and installed_ready and (!kernel_options.display_runtime or (display.finish_requested and display.metrics.input_events >= 3 and
+            (if (kernel_options.desktop_runtime) display.metrics.presented > display_ready_frames_b else display.metrics.frames_b > display_ready_frames_b))))
+        {
+            // Only the test host stops the otherwise persistent supervisor.
+            // All teardown happens after returning to the kernel root.
+            try processes.failInit(.{ .code = 0, .faulted = true });
+            try cleanupZombies();
+            const after = memory.allocator().?.stats();
+            if (after.free_pages != baseline_free or after.allocated_pages != baseline_allocated or budget.used.memory_pages != 0 or
+                budget.used.processes != 0 or budget.used.handles != 0 or budget.used.ipc_bytes != 0 or pipes.liveCount() != 0 or network.liveCount() != 0 or (kernel_options.display_runtime and (display.registry.liveCount() != 0 or display.bus.liveCount() != 0 or display.bus.queuedCount() != 0)))
+                return error.InstalledApplicationResourceLeak;
+            if (kernel_options.window_runtime) {
+                console.write("[kernel] window desktop teardown balanced\n");
+                console.write("[kernel] window desktop acceptance complete\n");
+            } else if (kernel_options.desktop_runtime) {
+                console.write("[kernel] service desktop teardown balanced\n");
+                console.write("[kernel] service desktop acceptance complete\n");
+            } else if (kernel_options.display_runtime) {
+                console.write("[kernel] focused display input verified\n");
+                console.write("[kernel] display teardown balanced\n");
+                console.write("[kernel] display acceptance complete\n");
+            } else {
+                console.write("[kernel] installed app teardown balanced; pages handles pipes reclaimed\n");
+                console.write("[kernel] application runtime acceptance complete\n");
+            }
+            return;
+        }
+    }
+}
+
+fn verifyInstalledReady() !void {
+    const cycles: usize = if (kernel_options.app_acceptance) 3 else 1;
+    if (observer_starts != 1 or worker_starts != cycles * 2 + 1 or worker_reaped != cycles * 2 or faults != cycles or observer_ticks < 2)
+        return error.ApplicationSupervisionIncomplete;
+    const observer = observer_pid orelse return error.ApplicationSupervisionIncomplete;
+    if (try processes.state(observer) == .zombie or !native[try processes.slot(observer)].live) return error.ObserverDidNotSurvive;
+    var workers: usize = 0;
+    for (native) |task| if (task.live and task.frames.app and task.profile.app_id == app_policy.worker_id and task.startup_read) {
+        workers += 1;
+    };
+    if (workers != 1 or budget.used.processes != 3) return error.PersistentApplicationsMissing;
+    installed_ready = true;
+    write_console("[kernel] installed app identities 101/102/103 verified\n");
+    write_console("[kernel] observer survived worker faults; zeroed heaps and relaunch cleanup verified\n");
+}
+
 fn pathFrom(bytes: []const u8) !Path {
     if (bytes.len == 0 or bytes.len > vfs.max_path) return error.PathTooLong;
     var result: Path = .{};
@@ -235,26 +411,39 @@ fn catalogPath(id: u64) !Path {
 
 const ImageParts = struct { owner: FrameOwner, frames: contract.TaskMemory, space: contract.AddressSpace, context: contract.ContextHandle };
 
+fn inspectInstalled(bytes: []const u8, package: app_policy.Package) !elf.Image {
+    const image = try elf.inspectApplication(bytes, builtin.cpu.arch);
+    for (image.segments[0..image.count]) |segment| {
+        const base = if (segment.flags == 5) contract.application_code else contract.application_data;
+        const pages = if (segment.flags == 5) package.code_pages else package.data_pages;
+        if (segment.address + segment.memory_size > base + @as(u64, pages) * contract.page_size) return error.UnsupportedAddressRange;
+    }
+    return image;
+}
+
 /// Stages an entire image while the old image stays intact. This may fail at
 /// full architecture capacity; no reclaim-old-first fallback weakens exec.
-fn buildImage(pid: Pid, bytes: []const u8, inherited_token: u64, argument: u64, extended: bool) !ImageParts {
+fn buildImage(pid: Pid, bytes: []const u8, inherited_token: u64, argument: u64, extended: bool, installed: ?app_policy.Package) !ImageParts {
     // The trusted launcher chooses the layout. ELF fields cannot enlarge it.
-    const image = if (extended) try elf.inspectDesktop(bytes, builtin.cpu.arch) else try elf.inspect(bytes, builtin.cpu.arch);
+    const image = if (installed) |package| try inspectInstalled(bytes, package) else if (extended) try elf.inspectDesktop(bytes, builtin.cpu.arch) else try elf.inspect(bytes, builtin.cpu.arch);
     var code_pages: u16 = 1;
     var data_pages: u16 = 1;
-    if (extended) {
+    if (extended or installed != null) {
         for (image.segments[0..image.count]) |segment| {
             if (segment.flags == 5) code_pages = @intCast((segment.address + segment.memory_size - contract.desktop_code + 4095) / 4096) else data_pages = @intCast((segment.address + segment.memory_size - contract.desktop_data + 4095) / 4096);
         }
-        if (code_pages > 4 or data_pages > 1) return error.UnsupportedAddressRange;
+        if (installed) |package| {
+            if (code_pages > package.code_pages or data_pages > package.data_pages) return error.UnsupportedAddressRange;
+        } else if (code_pages > 4 or data_pages > 1) return error.UnsupportedAddressRange;
     }
-    const stack_pages: u16 = if (extended) 4 else 1;
-    const charge = @as(u64, code_pages) + data_pages + stack_pages;
+    const stack_pages: u16 = if (installed) |package| package.stack_pages else if (extended) 4 else 1;
+    const heap_pages: u16 = if (installed) |package| package.heap_pages else 0;
+    const charge = @as(u64, code_pages) + data_pages + stack_pages + heap_pages + @intFromBool(installed != null);
     try budget.reserve(.{ .memory_pages = charge });
     errdefer budget.release(.{ .memory_pages = charge }) catch @panic("image quota rollback");
     var owner = try FrameOwner.init(memory.allocator().?, try memory.newOwnerId());
     errdefer owner.releaseAll() catch @panic("native frame rollback");
-    const frames: contract.TaskMemory = .{ .code = try frameRange(&owner, code_pages), .data = try frameRange(&owner, data_pages), .stack = try frameRange(&owner, stack_pages), .code_pages = code_pages, .data_pages = data_pages, .stack_pages = stack_pages, .desktop = extended };
+    const frames: contract.TaskMemory = .{ .code = try frameRange(&owner, code_pages), .data = try frameRange(&owner, data_pages), .stack = try frameRange(&owner, stack_pages), .code_pages = code_pages, .data_pages = data_pages, .stack_pages = stack_pages, .desktop = extended and installed == null, .app = installed != null, .startup = if (installed != null) try frameRange(&owner, 1) else 0, .heap = if (heap_pages != 0) try frameRange(&owner, heap_pages) else 0, .heap_pages = heap_pages };
     for (image.segments[0..image.count]) |segment| {
         const code_segment = segment.flags == 5;
         const window = if (code_segment) frames.codeVirtual() else frames.dataVirtual();
@@ -262,9 +451,17 @@ fn buildImage(pid: Pid, bytes: []const u8, inherited_token: u64, argument: u64, 
         const destination: [*]volatile u8 = @ptrFromInt(physical);
         for (bytes[@intCast(segment.offset)..@intCast(segment.offset + segment.file_size)], 0..) |byte, index| destination[index] = byte;
     }
+    const parent = try processes.parent(pid);
+    if (installed) |package| {
+        var startup: abi.Startup = .{ .pid = @backingInt(pid), .parent = if (parent) |value| @backingInt(value) else 0, .app_id = package.id, .inherited_token = inherited_token, .launch_arg = argument, .heap_capacity = @as(u64, heap_pages) * abi.page_size, .heap_length = @as(u64, heap_pages) * abi.page_size, .flags = if (kernel_options.app_acceptance) abi.application.test_mode else 0, .argc = 1, .envc = 1 };
+        startup.args[0] = try abi.Text.init(package.name);
+        var environment: [56]u8 = undefined;
+        startup.environment[0] = try abi.Text.init(try @import("std").fmt.bufPrint(&environment, "BEDROCK_ROLE={s}", .{package.role}));
+        const destination: [*]u8 = @ptrFromInt(frames.startup);
+        @memcpy(destination[0..@sizeOf(abi.Startup)], @import("std").mem.asBytes(&startup));
+    }
     const space = try arch.create(frames);
     errdefer arch.destroy(space) catch @panic("native space rollback");
-    const parent = try processes.parent(pid);
     const context = try arch.createContext(space, .{ .entry = image.entry, .user_sp = frames.stackTop(), .arg0 = if (parent) |value| @backingInt(value) else 0, .arg1 = inherited_token, .arg2 = argument });
     errdefer arch.destroyContext(context) catch @panic("native context rollback");
     try arch.validateContext(context);
@@ -314,10 +511,11 @@ fn load(pid: Pid, request: Spawn, profile: security.sandbox.Profile) !void {
         abi.image.fault_stack, abi.image.fault_boundary => request.image_id,
         else => request.argument,
     };
-    const image = try buildImage(pid, bytes, inherited_token, argument, extendedProfile(profile, request.path));
+    const package: ?app_policy.Package = if (request.package_id != 0) try app_policy.lookup(request.package_id) else null;
+    const image = try buildImage(pid, bytes, inherited_token, argument, extendedProfile(profile, request.path), package);
     if (request.grant) |grant| channelFor(grant.object_id).?.references += 1;
     // Moving a ledger transfers its lifetime; the local owner is no longer live.
-    native[slot] = .{ .live = true, .owner = image.owner, .frames = image.frames, .space = image.space, .context = image.context, .profile = profile, .handles = handles, .stdout = stdout, .files = files, .pipes = pipe_descriptors };
+    native[slot] = .{ .live = true, .pid = pid, .owner = image.owner, .frames = image.frames, .space = image.space, .context = image.context, .profile = profile, .handles = handles, .stdout = stdout, .files = files, .pipes = pipe_descriptors };
 }
 
 fn extendedProfile(profile: security.sandbox.Profile, path: Path) bool {
@@ -331,9 +529,21 @@ fn frameRange(owner: *FrameOwner, count: u16) !u64 {
     return range.base;
 }
 
-fn regions(task: *const Native) [3]user_memory.Region {
-    var result: [3]user_memory.Region = undefined;
-    for (task.frames.mappings(), 0..) |mapping, index| result[index] = .{ .virtual = mapping.virtual, .physical = mapping.physical, .length = @as(u64, mapping.pages) * abi.page_size, .writable = mapping.writable };
+const Regions = struct {
+    values: [5 + contract.shared_surface_slots]user_memory.Region = undefined,
+    count: usize,
+    fn slice(self: *const Regions) []const user_memory.Region {
+        return self.values[0..self.count];
+    }
+};
+fn regions(task: *const Native) Regions {
+    var result: Regions = .{ .count = task.frames.mappingCount() };
+    const mappings = task.frames.allMappings();
+    for (mappings[0..result.count], 0..) |mapping, index| result.values[index] = .{ .virtual = mapping.virtual, .physical = mapping.physical, .length = @as(u64, mapping.pages) * abi.page_size, .writable = mapping.writable };
+    for (task.shared, 0..) |shared, slot| if (shared.object != 0) {
+        result.values[result.count] = .{ .virtual = contract.shared_surface_base + slot * contract.shared_surface_stride, .physical = shared.mapping.physical, .length = @as(u64, shared.mapping.pages) * abi.page_size, .writable = shared.mapping.writable };
+        result.count += 1;
+    };
     return result;
 }
 
@@ -371,25 +581,132 @@ pub fn dispatch(event: *const contract.Event, reply: *contract.Reply) void {
 
 fn failProcess(pid: Pid) !void {
     faults += 1;
+    if (kernel_options.window_runtime) desktopProcessLog("[kernel] window process fault", &native[try processes.slot(pid)]);
     const status: policy.ExitStatus = .{ .code = abi.fault_exit_status, .faulted = true };
     if (processes.init_pid == pid) try processes.failInit(status) else try processes.exit(pid, status);
 }
 
 fn syscall(pid: Pid, task: *Native, event: *const contract.Event, reply: *contract.Reply) !void {
+    if (event.number >= 0x600 and event.number <= 0x624) {
+        if (!kernel_options.display_runtime or !task.frames.app) return error.NotSupported;
+        task.pending = .{ .display = .{ .number = event.number, .arg0 = event.arg0, .arg1 = event.arg1, .arg2 = event.arg2 } };
+        try processes.block(pid, .kernel_request);
+        reply.action = contract.action_suspend;
+        return;
+    }
+    const mapped = regions(task);
     switch (event.number) {
         abi.syscall.getpid => reply.result = @backingInt(pid),
         abi.syscall.clock_ticks => reply.result = processes.ticks,
+        abi.syscall.clock_read => reply.result = try clock_requests.read(wall_clock, mapped.slice(), event.arg0, event.arg1, event.arg2, processes.ticks),
+        abi.syscall.startup_info => {
+            if (!task.frames.app) return error.NotSupported;
+            if (event.arg0 != 0 or event.arg1 != 0 or event.arg2 != 0) return error.InvalidStartupRequest;
+            if (!task.startup_read) {
+                task.startup_read = true;
+                switch (task.profile.app_id) {
+                    app_policy.observer_id => {
+                        if (observer_pid) |existing| {
+                            if (existing != pid) return error.ObserverWasRestarted;
+                        } else {
+                            observer_starts += 1;
+                            observer_pid = pid;
+                        }
+                    },
+                    app_policy.worker_id => worker_starts += 1,
+                    app_policy.display_server_id => display_server_starts += 1,
+                    app_policy.shell_id => desktop_shell_starts += 1,
+                    app_policy.files_id => desktop_files_starts += 1,
+                    app_policy.notes_id => window_notes_starts += 1,
+                    app_policy.surface_one_id => display_client_a_starts += 1,
+                    app_policy.surface_two_id => display_client_b_starts += 1,
+                    else => {},
+                }
+                if (kernel_options.window_runtime) desktopProcessLog("[kernel] window process started", task) else if (kernel_options.desktop_runtime) desktopProcessLog("[kernel] desktop process started", task);
+            }
+            reply.result = contract.application_startup;
+        },
+        abi.syscall.application_ready => {
+            if (kernel_options.display_runtime) return error.NotSupported;
+            if (!task.frames.app or task.profile.app_id != app_policy.init_id or !task.profile.mayRequest(.app_launch)) return error.PermissionDenied;
+            if (event.arg0 != 0 or event.arg1 != 0 or event.arg2 != 0) return error.InvalidStartupRequest;
+            try verifyInstalledReady();
+            reply.result = 0;
+        },
+        abi.syscall.display_ready => {
+            if (!kernel_options.display_runtime or kernel_options.desktop_runtime or !task.frames.app or task.profile.app_id != app_policy.init_id or !task.profile.mayRequest(.app_launch)) return error.PermissionDenied;
+            if (event.arg0 != 0 or event.arg1 != 0 or event.arg2 != 0) return error.InvalidStartupRequest;
+            const cycles: usize = if (kernel_options.app_acceptance) 3 else 1;
+            if (display_server_starts != 1 or display_client_b_starts != 1 or display_client_a_starts != cycles * 2 + 1 or display_client_a_exits != cycles * 2 or faults != cycles or display.metrics.reclaimed_a != cycles * 2 or
+                display.metrics.frames_a < cycles * 6 + 3 or display.metrics.frames_b < 3 or display.metrics.ro_released < cycles * 6 + 3 or display.registry.liveCount() != 3 or budget.used.processes != 4) return error.DisplaySupervisionIncomplete;
+            installed_ready = true;
+            display_ready_frames_b = display.metrics.frames_b;
+            write_console("[kernel] display identities and surface ownership verified\n");
+            reply.result = 0;
+        },
+        abi.syscall.desktop_ready => {
+            if (!kernel_options.desktop_runtime or kernel_options.window_runtime or !task.frames.app or task.profile.app_id != app_policy.init_id or !task.profile.mayRequest(.app_launch)) return error.PermissionDenied;
+            if (event.arg0 != 0 or event.arg1 != 0 or event.arg2 != 0) return error.InvalidStartupRequest;
+            if (display_server_starts != 1 or desktop_shell_starts != 1 or desktop_files_starts == 0 or liveDesktopPid(app_policy.files_id) == 0 or
+                display.metrics.frames_files == 0 or display.metrics.frames_shell == 0 or display.metrics.presented == 0 or display.registry.liveCount() != 5 or budget.used.processes != 4) return error.DisplaySupervisionIncomplete;
+            installed_ready = true;
+            display_ready_frames_b = display.metrics.presented;
+            write_console("[kernel] desktop service identities verified\n");
+            reply.result = 0;
+        },
+        abi.syscall.window_ready => {
+            if (!kernel_options.window_runtime or !task.frames.app or task.profile.app_id != app_policy.init_id or !task.profile.mayRequest(.app_launch)) return error.PermissionDenied;
+            if (event.arg0 != 0 or event.arg1 != 0 or event.arg2 != 0) return error.InvalidStartupRequest;
+            const files_windows = try display.producerCount(app_policy.files_id);
+            const notes_windows = try display.producerCount(app_policy.notes_id);
+            const expected_surfaces = try @import("window_message_policy.zig").sceneSurfaceCount(files_windows, notes_windows);
+            if (display_server_starts != 1 or desktop_shell_starts != 1 or desktop_files_starts == 0 or window_notes_starts == 0 or
+                liveDesktopPid(app_policy.files_id) == 0 or liveDesktopPid(app_policy.notes_id) == 0 or display.metrics.frames_files == 0 or display.metrics.frames_notes == 0 or
+                files_windows == 0 or notes_windows == 0 or display.metrics.frames_shell == 0 or display.metrics.presented == 0 or display.registry.liveCount() != expected_surfaces or budget.used.processes != 5) return error.DisplaySupervisionIncomplete;
+            installed_ready = true;
+            display_ready_frames_b = display.metrics.presented;
+            write_console("[kernel] window desktop identities verified\n");
+            reply.result = 0;
+        },
+        abi.syscall.spawn_app => {
+            const target_profile = try app_policy.authorizeLaunch(task.profile, event.arg0);
+            if (!task.frames.app) return error.PermissionDenied;
+            const package = try app_policy.lookup(target_profile.app_id);
+            _ = try storage.execPath(target_profile, package.path);
+            var request: Spawn = .{ .path = try pathFrom(package.path), .package_id = package.id, .argument = event.arg1 };
+            if (event.arg2 != 0) {
+                request.pipe_grant = try task.pipes.resolve(task.profile.app_id, @fromBackingInt(event.arg2), pipe.write_right);
+                request.pipe_grant.?.rights = pipe.write_right;
+            }
+            if (package.id == app_policy.worker_id) {
+                for (native) |candidate| if (candidate.live and candidate.frames.app and candidate.profile.app_id == app_policy.worker_id) return error.ApplicationAlreadyRunning;
+                const pages = memory.allocator().?.stats().free_pages;
+                if (worker_baseline) |expected| {
+                    if (pages != expected or budget.used.memory_pages != worker_memory_baseline.?) return error.WorkerRelaunchResourceLeak;
+                } else {
+                    worker_baseline = pages;
+                    worker_memory_baseline = budget.used.memory_pages;
+                }
+                worker_handles_baseline = budget.used.handles;
+            }
+            task.pending = .{ .spawn = request };
+            try processes.block(pid, .kernel_request);
+            reply.action = contract.action_suspend;
+        },
         abi.syscall.wifi_status, abi.syscall.wifi_scan_start, abi.syscall.wifi_scan_read, abi.syscall.wifi_join, abi.syscall.wifi_disconnect, abi.syscall.wifi_enable => {
-            reply.result = try wifi_requests.serve(task.profile, &regions(task), event.number, event.arg0, event.arg1, event.arg2, processes.ticks);
+            reply.result = try wifi_requests.serve(task.profile, mapped.slice(), event.number, event.arg0, event.arg1, event.arg2, processes.ticks);
         },
         abi.syscall.udp_open, abi.syscall.udp_send, abi.syscall.udp_receive => {
-            reply.result = try network_requests.serve(task.profile, &task.handles, &budget, &regions(task), event.number, event.arg0, event.arg1, event.arg2);
+            reply.result = try network_requests.serve(task.profile, &task.handles, &budget, mapped.slice(), event.number, event.arg0, event.arg1, event.arg2);
         },
         abi.syscall.list, abi.syscall.mkdir, abi.syscall.copy, abi.syscall.rename, abi.syscall.unlink, abi.syscall.nullify => {
-            reply.result = try @import("directory_syscalls.zig").serve(task.profile, &regions(task), event.number, event.arg0, event.arg1, event.arg2);
+            reply.result = try @import("directory_syscalls.zig").serve(task.profile, mapped.slice(), event.number, event.arg0, event.arg1, event.arg2);
             file_operations += 1;
+            if (kernel_options.desktop_runtime and task.profile.app_id == app_policy.files_id and event.number == abi.syscall.nullify)
+                write_console("[kernel] Files nullify logical banks verified\n");
         },
         abi.syscall.spawn => {
+            if (task.frames.app) return error.NotSupported;
             if (event.arg0 != abi.image.service and event.arg0 != abi.image.fault and
                 event.arg0 != abi.image.fault_stack and event.arg0 != abi.image.fault_boundary) return error.UnknownUserImage;
             var grant: ?security.handles.Grant = null;
@@ -404,6 +721,9 @@ fn syscall(pid: Pid, task: *Native, event: *const contract.Event, reply: *contra
             reply.action = contract.action_suspend;
         },
         abi.syscall.spawn_path, abi.syscall.spawn_pipe => {
+            // Installed application identities are assigned only by the
+            // trusted launch service; path spawning remains a fixture API.
+            if (task.frames.app) return error.NotSupported;
             const path = try copyPath(task, event.arg0, event.arg1);
             _ = try storage.execPath(task.profile, path.bytes[0..path.length]);
             var request: Spawn = .{ .path = path };
@@ -443,7 +763,7 @@ fn syscall(pid: Pid, task: *Native, event: *const contract.Event, reply: *contra
             var bytes: [256]u8 = undefined;
             // Validate the whole requested output before either backend consumes
             // bytes or advances an offset. Zero-length I/O still checks the fd.
-            const physical = if (length != 0) try user_memory.translateWrite(&regions(task), event.arg1, length) else 0;
+            const physical = if (length != 0) try user_memory.translateWrite(mapped.slice(), event.arg1, length) else 0;
             const got = if (event.arg0 & (3 << 62) == pipe.descriptor_tag) blk: {
                 const grant = try task.pipes.resolve(task.profile.app_id, @fromBackingInt(event.arg0), pipe.read_right);
                 const count = try pipes.read(grant, bytes[0..length]);
@@ -477,7 +797,7 @@ fn syscall(pid: Pid, task: *Native, event: *const contract.Event, reply: *contra
         },
         abi.syscall.pipe => {
             if (event.arg1 != 0 or event.arg2 != 0) return error.InvalidPipe;
-            const physical = try user_memory.translateWrite(&regions(task), event.arg0, 16);
+            const physical = try user_memory.translateWrite(mapped.slice(), event.arg0, 16);
             try budget.reserve(.{ .handles = 2 });
             errdefer budget.release(.{ .handles = 2 }) catch @panic("pipe descriptor rollback");
             const object = try pipes.create();
@@ -515,7 +835,12 @@ fn syscall(pid: Pid, task: *Native, event: *const contract.Event, reply: *contra
         },
         abi.syscall.wait => {
             const child: ?Pid = if (event.arg0 == 0) null else @fromBackingInt(event.arg0);
-            switch (try processes.wait(pid, child)) {
+            if (event.arg1 > 1 or event.arg2 != 0) return error.InvalidWait;
+            const result: policy.WaitResult = if (event.arg1 == 1) blk: {
+                const ready = (try processes.pollWait(pid, child)) orelse return error.WouldBlock;
+                break :blk .{ .ready = ready };
+            } else try processes.wait(pid, child);
+            switch (result) {
                 .ready => |exit_record| {
                     if (native[try processes.slot(exit_record.pid)].live) @panic("wait before child resource teardown");
                     const reaped = try processes.reap(pid, exit_record.pid);
@@ -534,6 +859,7 @@ fn syscall(pid: Pid, task: *Native, event: *const contract.Event, reply: *contra
             reply.action = contract.action_suspend;
         },
         abi.syscall.sleep => {
+            if (task.frames.app and task.profile.app_id == app_policy.observer_id) observer_ticks += 1;
             if (event.arg0 == 0) {
                 try processes.yield(pid);
             } else {
@@ -583,7 +909,7 @@ fn syscall(pid: Pid, task: *Native, event: *const contract.Event, reply: *contra
             if (event.arg2 < @sizeOf(abi.MessageHeader) or event.arg2 > @sizeOf(abi.MessageHeader) + abi.max_payload)
                 return error.MessageTooLarge;
             const map = regions(task);
-            _ = try user_memory.translateWrite(&map, event.arg1, event.arg2);
+            _ = try user_memory.translateWrite(map.slice(), event.arg1, event.arg2);
             if (try receive(task, grant.object_id, event.arg1, @intCast(event.arg2))) |length| {
                 reply.result = length;
                 try notify(grant.object_id, true);
@@ -608,6 +934,11 @@ fn syscall(pid: Pid, task: *Native, event: *const contract.Event, reply: *contra
             }
             const token: security.handles.Token = if (event.arg0 == 1) task.stdout orelse return error.InvalidToken else @fromBackingInt(event.arg0);
             const grant = try resolveAny(&task.handles, token);
+            if (grant.kind == .surface or grant.kind == .service) {
+                try display.close(displayClient(task), token, grant.kind);
+                reply.result = 0;
+                return;
+            }
             if (grant.kind == .socket) {
                 try network_requests.close(&task.handles, &budget, token);
                 reply.result = 0;
@@ -671,7 +1002,7 @@ fn receive(task: *Native, object: u64, address: u64, capacity_bytes: usize) !?us
     putU64(output[8..16], message.length);
     @memcpy(output[16..size], message.data[0..message.length]);
     const map = regions(task);
-    const physical = try user_memory.translateWrite(&map, address, size);
+    const physical = try user_memory.translateWrite(map.slice(), address, size);
     // All copyout permissions/ranges and capacity were checked before dequeue.
     _ = try mailboxes.receive(object);
     try budget.release(.{ .ipc_bytes = message.length });
@@ -683,7 +1014,7 @@ fn receive(task: *Native, object: u64, address: u64, capacity_bytes: usize) !?us
 fn copyin(task: *const Native, address: u64, output: []u8) !void {
     if (output.len == 0) return;
     const map = regions(task);
-    const physical = try user_memory.translateRead(&map, address, output.len);
+    const physical = try user_memory.translateRead(map.slice(), address, output.len);
     const source: [*]const volatile u8 = @ptrFromInt(physical);
     for (output, 0..) |*byte, index| byte.* = source[index];
 }
@@ -711,8 +1042,13 @@ fn finishKernelRequests() !void {
         const task = &native[slot];
         if (!task.live) continue;
         switch (task.pending) {
+            .display => |request| {
+                const mapped = regions(task);
+                const result = (if (request.number == abi.syscall.window_state) windowState(task, request.arg0, request.arg1, request.arg2) else if (request.number == abi.syscall.desktop_state) desktopState(task, request.arg0, request.arg1, request.arg2) else display.execute(displayClient(task), request.number, request.arg0, request.arg1, request.arg2, mapped.slice())) catch |err| errorResult(err);
+                try complete(pid, task, result);
+            },
             .spawn => |request| {
-                const profile = try task.profile.deriveChild(task.profile.permissions);
+                const profile = if (request.package_id != 0) try app_policy.authorizeLaunch(task.profile, request.package_id) else try task.profile.deriveChild(task.profile.permissions);
                 const child = processes.spawn(pid) catch |err| {
                     try complete(pid, task, errorResult(err));
                     continue;
@@ -811,6 +1147,9 @@ fn cleanupZombies() !void {
 }
 
 fn unload(task: *Native) !void {
+    const worker = task.frames.app and task.profile.app_id == app_policy.worker_id;
+    const display_a = task.frames.app and task.profile.app_id == app_policy.surface_one_id;
+    if (kernel_options.display_runtime) try display.detach(displayClient(task));
     try arch.destroyContext(task.context);
     try arch.destroy(task.space);
     try closeAuthority(task, null);
@@ -819,6 +1158,21 @@ fn unload(task: *Native) !void {
     task.stdout = null;
     task.pending = .none;
     task.live = false;
+    if (kernel_options.desktop_runtime and task.profile.app_id == app_policy.files_id) {
+        desktop_files_exits += 1;
+        desktopProcessLog(if (kernel_options.window_runtime) "[kernel] window generation reclaimed" else "[kernel] desktop Files generation reclaimed", task);
+    }
+    if (kernel_options.window_runtime and task.profile.app_id == app_policy.notes_id) {
+        window_notes_exits += 1;
+        desktopProcessLog("[kernel] window generation reclaimed", task);
+    }
+    if (display_a and !installed_ready and !session_teardown) display_client_a_exits += 1;
+    if (worker and !installed_ready and !session_teardown) {
+        worker_reaped += 1;
+        if (memory.allocator().?.stats().free_pages != worker_baseline.? or budget.used.memory_pages != worker_memory_baseline.? or budget.used.handles != worker_handles_baseline.?)
+            return error.WorkerTeardownResourceLeak;
+        write_console("[kernel] worker generation reclaimed; observer retained\n");
+    }
 }
 
 fn closePipe(task: *Native, token: pipe.Descriptor) !void {
@@ -828,6 +1182,7 @@ fn closePipe(task: *Native, token: pipe.Descriptor) !void {
 }
 
 fn closeAuthority(task: *Native, retained: ?security.handles.Token) !void {
+    if (kernel_options.display_runtime) try display.detach(displayClient(task));
     try budget.release(.{ .handles = task.files.closeAll() });
     for (0..task.pipes.slots.len) |index| if (task.pipes.tokenAt(index)) |token| try closePipe(task, token);
     // Close exact live tokens, including inherited descriptors, before release.
@@ -852,7 +1207,7 @@ fn releaseImage(image: *ImageParts) !void {
     try budget.release(.{ .memory_pages = imageCharge(image.frames) });
 }
 fn imageCharge(frames: contract.TaskMemory) u64 {
-    return @as(u64, frames.code_pages) + frames.data_pages + frames.stack_pages;
+    return @as(u64, frames.code_pages) + frames.data_pages + frames.stack_pages + frames.heap_pages + @intFromBool(frames.app);
 }
 
 /// Occupy every architecture registry slot with independently owned native
@@ -900,7 +1255,8 @@ fn replace(pid: Pid, task: *Native, path: Path, argument: u64) !void {
     errdefer budget.release(.{ .handles = 1 }) catch @panic("exec stdout charge rollback");
     const stdout = try task.handles.insert(stdoutGrant());
     errdefer task.handles.close(stdout) catch @panic("exec stdout rollback");
-    var image = try buildImage(pid, bytes, 0, argument, extendedProfile(task.profile, path));
+    const package: ?app_policy.Package = if (task.frames.app) try app_policy.lookup(task.profile.app_id) else null;
+    var image = try buildImage(pid, bytes, 0, argument, extendedProfile(task.profile, path), package);
     errdefer releaseImage(&image) catch @panic("exec image rollback");
     var old: ImageParts = .{ .owner = task.owner, .frames = task.frames, .space = task.space, .context = task.context };
     // Everything fallible for an untrusted request has completed. Remaining
@@ -916,6 +1272,7 @@ fn replace(pid: Pid, task: *Native, path: Path, argument: u64) !void {
     task.context = image.context;
     task.stdout = stdout;
     task.pending = .none;
+    task.startup_read = false;
     processes.wake(pid, 0) catch @panic("exec process wake");
     _ = processes.takeWake(pid) catch @panic("exec wake consumption");
     releaseImage(&old) catch @panic("exec old image teardown");
@@ -923,13 +1280,87 @@ fn replace(pid: Pid, task: *Native, path: Path, argument: u64) !void {
 }
 
 fn resolveAny(handles: *const Grants, token: security.handles.Token) !security.handles.Grant {
-    return handles.resolve(token, .ipc, 0) catch |err| {
-        if (err != error.WrongObjectKind) return err;
-        return handles.resolve(token, .file, 0) catch |file_error| {
-            if (file_error != error.WrongObjectKind) return file_error;
-            return handles.resolve(token, .socket, 0);
-        };
+    for ([_]security.handles.ObjectKind{ .file, .ipc, .socket, .surface, .service }) |kind| {
+        if (handles.resolve(token, kind, 0)) |grant| return grant else |err| if (err != error.WrongObjectKind) return err;
+    }
+    return error.WrongObjectKind;
+}
+
+fn displayClient(task: *Native) display_requests.Client {
+    return .{ .identity = .{ .pid = @backingInt(task.pid), .app_id = task.profile.app_id }, .profile = task.profile, .space = task.space, .handles = &task.handles, .shared = &task.shared };
+}
+
+fn liveDesktopPid(app: u64) u64 {
+    for (native) |task| if (task.live and task.startup_read and task.profile.app_id == app) return @backingInt(task.pid);
+    return 0;
+}
+
+fn desktopProcessLog(prefix: []const u8, task: *const Native) void {
+    var buffer: [160]u8 = undefined;
+    const line = @import("std").fmt.bufPrint(&buffer, "{s} pid={d} app={d}\n", .{ prefix, @backingInt(task.pid), task.profile.app_id }) catch @panic("desktop lifecycle log");
+    write_console(line);
+}
+
+/// Privileged service diagnostics authenticate resource identities here. The
+/// service supplies its window-state label; policy and geometry stay userspace.
+fn desktopState(task: *Native, state: u64, arg1: u64, arg2: u64) !u64 {
+    if (!kernel_options.desktop_runtime or kernel_options.window_runtime or task.profile.app_id != app_policy.display_server_id or !task.profile.mayRequest(.display_service)) return error.PermissionDenied;
+    if (arg1 != 0 or arg2 != 0 or state == 0 or state > 7) return error.InvalidDesktopState;
+    const server_pid = liveDesktopPid(app_policy.display_server_id);
+    const shell_pid = liveDesktopPid(app_policy.shell_id);
+    const files_pid = liveDesktopPid(app_policy.files_id);
+    const surfaces_count = display.registry.liveCount();
+    if (server_pid != @backingInt(task.pid) or shell_pid == 0 or display_server_starts != 1 or desktop_shell_starts != 1) return error.DisplaySupervisionIncomplete;
+    if (state == 3) {
+        if (files_pid != 0 or surfaces_count != 4 or desktop_files_exits == 0) return error.WouldBlock;
+    } else if (files_pid == 0 or surfaces_count != 5 or display.metrics.frames_files == 0 or display.metrics.frames_shell == 0) return error.WouldBlock;
+    if (state == 4 and desktop_files_starts < 2) return error.DisplaySupervisionIncomplete;
+    const label = switch (state) {
+        1 => "ready",
+        2 => "minimized",
+        3 => "closed",
+        4 => "relaunched",
+        5 => "maximized",
+        6 => "fullscreen",
+        7 => "restored",
+        else => unreachable,
     };
+    var buffer: [224]u8 = undefined;
+    const line = try @import("std").fmt.bufPrint(&buffer, "[kernel] service desktop state state={s} server_pid={d} shell_pid={d} files_pid={d} files_app=2 surface_count={d}\n", .{ label, server_pid, shell_pid, files_pid, surfaces_count });
+    write_console(line);
+    return 0;
+}
+
+fn windowState(task: *Native, state: u64, app: u64, aux: u64) !u64 {
+    if (!kernel_options.window_runtime or task.profile.app_id != app_policy.display_server_id or !task.profile.mayRequest(.display_service)) return error.PermissionDenied;
+    if (state == 0 or state > 11 or (app != 0 and app != app_policy.files_id and app != app_policy.notes_id)) return error.InvalidDesktopState;
+    const server_pid = liveDesktopPid(app_policy.display_server_id);
+    const shell_pid = liveDesktopPid(app_policy.shell_id);
+    const files_pid = liveDesktopPid(app_policy.files_id);
+    const notes_pid = liveDesktopPid(app_policy.notes_id);
+    const target_pid = if (app == app_policy.files_id) files_pid else if (app == app_policy.notes_id) notes_pid else 0;
+    if (server_pid != @backingInt(task.pid) or shell_pid == 0 or display_server_starts != 1 or desktop_shell_starts != 1) return error.DisplaySupervisionIncomplete;
+    if (state == 9) {
+        if (aux >= 4) return error.InvalidDesktopState;
+    } else if (state == 10) {
+        if (aux > 1) return error.InvalidDesktopState;
+    } else if (state == 11) {
+        if (aux != 0 and aux != files_pid and aux != notes_pid) return error.InvalidDesktopState;
+    } else if (aux != 0) return error.InvalidDesktopState;
+    const clients: u64 = @as(u64, @intFromBool(files_pid != 0)) + @as(u64, @intFromBool(notes_pid != 0));
+    const surface_count = display.registry.liveCount();
+    const expected_surfaces = try @import("window_message_policy.zig").sceneSurfaceCount(try display.producerCount(app_policy.files_id), try display.producerCount(app_policy.notes_id));
+    if (surface_count != expected_surfaces or budget.used.processes != 3 + clients or display.metrics.frames_shell == 0) return error.WouldBlock;
+    if (state == 3) {
+        if (app == 0 or target_pid != 0 or (if (app == app_policy.files_id) desktop_files_exits else window_notes_exits) == 0) return error.WouldBlock;
+    } else if (app != 0 and target_pid == 0) return error.WouldBlock;
+    if (state == 1 and (files_pid == 0 or notes_pid == 0 or display.metrics.frames_files == 0 or display.metrics.frames_notes == 0)) return error.WouldBlock;
+    if (state == 4 and (app == 0 or (if (app == app_policy.files_id) desktop_files_starts else window_notes_starts) < 2)) return error.DisplaySupervisionIncomplete;
+    const labels = [_][]const u8{ "ready", "minimized", "closed", "relaunched", "maximized", "fullscreen", "restored", "resized", "workspace", "tiled", "focused" };
+    var buffer: [320]u8 = undefined;
+    const line = try @import("std").fmt.bufPrint(&buffer, "[kernel] window desktop state state={s} app={d} aux={d} server_pid={d} shell_pid={d} files_pid={d} notes_pid={d} surface_count={d} process_count={d}\n", .{ labels[state - 1], app, aux, server_pid, shell_pid, files_pid, notes_pid, surface_count, budget.used.processes });
+    write_console(line);
+    return 0;
 }
 
 fn channelFor(id: u64) ?*Channel {
@@ -958,7 +1389,7 @@ pub fn errorResult(err: anyerror) u64 {
     return switch (err) {
         error.InvalidUserRange, error.InvalidMapping => abi.errno.fault,
         error.PermissionDenied => abi.errno.permission,
-        error.InvalidToken, error.StaleToken, error.WrongObjectKind, error.InvalidDescriptor, error.StaleDescriptor, error.StaleNode, error.InvalidEndpointIdentity, error.StaleEndpoint => abi.errno.bad_descriptor,
+        error.InvalidToken, error.StaleToken, error.WrongObjectKind, error.InvalidDescriptor, error.StaleDescriptor, error.StaleNode, error.InvalidEndpointIdentity, error.StaleEndpoint, error.InvalidSurface, error.StaleSurface, error.InvalidConnection, error.ConnectionClosed, error.InvalidService, error.ServiceClosed, error.StaleConnection, error.StaleService, error.WrongServiceObjectKind => abi.errno.bad_descriptor,
         error.AlreadyExists => abi.errno.exists,
         error.DirectoryNotEmpty => abi.errno.not_empty,
         error.ReadOnly => abi.errno.read_only,
@@ -967,16 +1398,16 @@ pub fn errorResult(err: anyerror) u64 {
         error.WouldBlock => abi.errno.again,
         error.NetworkUnavailable => abi.errno.network_unavailable,
         error.RadioUnavailable, error.RadioDisabled => abi.errno.network_unavailable,
-        error.UnsupportedSecurity, error.UnsupportedOperation => abi.errno.not_supported,
+        error.UnsupportedSecurity, error.UnsupportedOperation, error.NotSupported => abi.errno.not_supported,
         error.StaleScan => abi.errno.stale,
-        error.Busy => abi.errno.busy,
+        error.Busy, error.ApplicationAlreadyRunning, error.SurfaceBusy, error.SurfaceMappingActive => abi.errno.busy,
         error.NotSeekable => abi.errno.not_seekable,
-        error.NotFound => abi.errno.no_entry,
+        error.NotFound, error.ApplicationNotInstalled, error.ServiceUnavailable => abi.errno.no_entry,
         error.NoChildren, error.NotChild => abi.errno.no_child,
         error.InvalidPid, error.StalePid => abi.errno.no_process,
         error.ChannelClosed, error.UnknownChannel, error.StaleObjectIdentity, error.InvalidObjectIdentity => abi.errno.broken_pipe,
         error.MessageTooLarge, error.PayloadTooLarge, error.BufferTooSmall => abi.errno.message_size,
-        error.OutOfMemory, error.ResourceLimitExceeded, error.ProcessCapacity, error.ChannelCapacity, error.MailboxCapacity, error.TableFull, error.PipeCapacity, error.FileTableFull, error.NodeCapacity, error.PageTableCapacity, error.ContextCapacityOrState, error.ContextCapacity, error.AddressSpaceCapacity, error.EndpointCapacity, error.PortExhausted => abi.errno.no_memory,
+        error.OutOfMemory, error.ResourceLimitExceeded, error.ProcessCapacity, error.ChannelCapacity, error.MailboxCapacity, error.TableFull, error.PipeCapacity, error.FileTableFull, error.NodeCapacity, error.PageTableCapacity, error.ContextCapacityOrState, error.ContextCapacity, error.AddressSpaceCapacity, error.EndpointCapacity, error.PortExhausted, error.SurfaceCapacity, error.ConnectionCapacity, error.ServiceCapacity => abi.errno.no_memory,
         error.InitHasChildren => abi.errno.busy,
         else => abi.errno.invalid,
     };

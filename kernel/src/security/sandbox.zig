@@ -15,8 +15,11 @@ pub const Permission = enum(u8) {
     microphone,
     wifi_observe,
     wifi_control,
+    app_launch,
+    display_service,
+    display_client,
 };
-pub const known_permissions: Mask = (1 << 9) - 1;
+pub const known_permissions: Mask = (1 << 12) - 1;
 
 pub fn bit(permission: Permission) Mask {
     return @as(Mask, 1) << @as(u5, @intCast(@backingInt(permission)));
@@ -33,6 +36,9 @@ pub const Source = union(enum) {
     network_client,
     network_server,
     ipc_service,
+    display_service,
+    private_surface: u64,
+    display_snapshot,
     /// Trusted launcher's already-approved standard-stream rights. Application
     /// request text cannot manufacture this provenance or increase its mask.
     inherited_stream: handles.Rights,
@@ -108,6 +114,18 @@ pub const Profile = struct {
             .ipc_service => blk: {
                 if (grant.kind != .ipc or !self.mayRequest(.ipc_service)) return error.PermissionDenied;
                 break :blk handles.rights.send | handles.rights.receive;
+            },
+            .display_service => blk: {
+                if (grant.kind != .service or (!self.mayRequest(.display_service) and !self.mayRequest(.display_client))) return error.PermissionDenied;
+                break :blk handles.rights.send | handles.rights.receive;
+            },
+            .private_surface => |owner| blk: {
+                if (grant.kind != .surface or owner != self.app_id or (!self.mayRequest(.display_client) and !self.mayRequest(.display_service))) return error.PermissionDenied;
+                break :blk handles.rights.read | handles.rights.write | handles.rights.send;
+            },
+            .display_snapshot => blk: {
+                if (grant.kind != .surface or !self.mayRequest(.display_service)) return error.PermissionDenied;
+                break :blk handles.rights.read;
             },
             .inherited_stream => |approved| blk: {
                 if (grant.kind != .file or approved & ~(handles.rights.read | handles.rights.write) != 0)
@@ -200,6 +218,38 @@ test "children retain identity and cannot widen permissions" {
     try std.testing.expectError(error.PermissionDenied, child.deriveChild(bit(.camera)));
     try std.testing.expectError(error.InvalidPermissions, child.deriveChild(1 << 31));
     try std.testing.expectEqual(@as(Mask, 0), (try child.deriveChild(0)).permissions);
+}
+
+test "display eligibility preserves producer identity and read-only snapshots" {
+    const producer = try Profile.init(105, bit(.display_client), bit(.display_client));
+    const compositor = try Profile.init(104, bit(.display_service), bit(.display_service));
+    const none = try Profile.init(105, 0, 0);
+    const service: handles.Grant = .{ .kind = .service, .object_id = 1, .rights = handles.rights.send | handles.rights.receive };
+    const pixels: handles.Grant = .{ .kind = .surface, .object_id = 2, .rights = handles.rights.read | handles.rights.write | handles.rights.send };
+    try std.testing.expectError(error.PermissionDenied, none.authorizeGrant(service, .display_service));
+    try std.testing.expectError(error.PermissionDenied, none.authorizeGrant(pixels, .{ .private_surface = 105 }));
+    try producer.authorizeGrant(service, .display_service);
+    try producer.authorizeGrant(pixels, .{ .private_surface = 105 });
+    try std.testing.expectError(error.PermissionDenied, producer.authorizeGrant(pixels, .{ .private_surface = 106 }));
+    const snapshot: handles.Grant = .{ .kind = .surface, .object_id = 2, .rights = handles.rights.read };
+    try std.testing.expectError(error.PermissionDenied, producer.authorizeGrant(snapshot, .display_snapshot));
+    try compositor.authorizeGrant(snapshot, .display_snapshot);
+    try std.testing.expectError(error.PermissionDenied, compositor.authorizeGrant(pixels, .display_snapshot));
+    try std.testing.expectError(error.PermissionDenied, compositor.authorizeGrant(pixels, .{ .private_surface = 105 }));
+    var table: handles.Table(2) = .{};
+    const token = try table.insert(snapshot);
+    try std.testing.expectError(error.PermissionDenied, table.resolve(token, .surface, handles.rights.write));
+    try std.testing.expectError(error.PermissionDenied, table.duplicate(token, handles.rights.read | handles.rights.write));
+}
+
+test "display permissions do not grant unrelated service or device authority" {
+    const display = try Profile.init(104, bit(.display_service), bit(.display_service));
+    try std.testing.expect(!display.mayRequest(.app_launch));
+    try std.testing.expect(!display.mayRequest(.network_client));
+    try std.testing.expect(!display.mayRequest(.wifi_control));
+    try std.testing.expectError(error.PermissionDenied, display.authorizeGrant(.{ .kind = .socket, .object_id = 3, .rights = handles.rights.connect }, .network_client));
+    try std.testing.expectError(error.PermissionDenied, display.authorizeGrant(.{ .kind = .ipc, .object_id = 4, .rights = handles.rights.send }, .ipc_service));
+    try std.testing.expectError(error.PermissionDenied, display.authorizeGrant(fileGrant(handles.rights.read), .display_snapshot));
 }
 
 test "corrupt profiles and malformed grants fail closed" {

@@ -84,6 +84,9 @@ pub fn run(comptime console: type, info: *const protocol.BootInfo, architecture:
     try disk.storage.mountBundle(profile, "/bundle/Files.elf", @embedFile("user_files_image"), true);
     try seedDirectory("/container/Documents");
     try seedDirectory("/container/Downloads");
+    // Optional home-directory upgrade must not reject existing full disks or
+    // replace a user item already named Desktop.
+    disk.storage.mkdir(profile, "/container/Desktop") catch {};
     try seedWelcome();
     try launchClient();
     defer retireClient() catch @panic("desktop client teardown");

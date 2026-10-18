@@ -3,5 +3,5 @@
     .fingerprint = 0x43656d5a4d85276f,
     .version = "0.1.0",
     .minimum_zig_version = "0.17.0",
-    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "AXIS_SANS.md", "axis-sans.json", "tools" },
 }

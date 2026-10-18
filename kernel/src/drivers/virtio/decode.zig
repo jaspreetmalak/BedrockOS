@@ -188,6 +188,7 @@ fn keyCode(code: u16) ?u16 {
         63 => 0x109,
         62 => 0x10a,
         87 => 0x10b,
+        88 => 0x10c,
         111 => 127,
         else => null,
     };
@@ -226,6 +227,10 @@ test "keyboard emits separate key/text events and tracks modifiers and button id
     try std.testing.expectEqual(@as(u64, 4 | (1 << 8) | (0x10a << 16)), decoder.pop().?);
     try decoder.feed(.{ .event_type = 1, .code = 87, .value = 1 }, .{}, .{});
     try std.testing.expectEqual(@as(u64, 4 | (1 << 8) | (0x10b << 16)), decoder.pop().?);
+    try decoder.feed(.{ .event_type = 1, .code = 88, .value = 1 }, .{}, .{});
+    try std.testing.expectEqual(@as(u64, 4 | (1 << 8) | (0x10c << 16)), decoder.pop().?);
+    try decoder.feed(.{ .event_type = 1, .code = 88, .value = 0 }, .{}, .{});
+    try std.testing.expectEqual(@as(u64, 5 | (1 << 8) | (0x10c << 16)), decoder.pop().?);
 }
 
 test "unknown events are ignored and full decoded queue fails explicitly" {

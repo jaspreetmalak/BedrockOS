@@ -71,3 +71,14 @@ export fn bedrock_durable_compile_probe(device: *const filesystem.BlockDevice) u
     fs.nullify("/probe/file") catch return 52;
     return 0;
 }
+
+/// Compile GPT metadata checks and bounded forwarding for every target.
+export fn bedrock_partition_compile_probe(parent: *const filesystem.BlockDevice) u32 {
+    const partition = (filesystem.partition.parseBedrockData(parent.*) catch return 60) orelse return 61;
+    var view = filesystem.partition.View.init(parent.*, partition) catch return 62;
+    const device = view.device();
+    var bytes: [512]u8 = undefined;
+    device.read(0, &bytes) catch return 63;
+    device.read(device.block_count, &bytes) catch |err| return if (err == error.OutOfBounds) 0 else 64;
+    return 65;
+}

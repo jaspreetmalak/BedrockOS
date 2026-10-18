@@ -7,6 +7,8 @@ var nic: ?virtio.Net = null;
 var stack: core.Stack = .{};
 var initialized = false;
 var available = false;
+const Wireless = struct { context: *anyopaque, connected: *const fn (*anyopaque) bool };
+var wireless: ?Wireless = null;
 var receive_buffer: [core.max_frame]u8 = undefined;
 
 /// Optional NIC absence never breaks an existing non-network boot profile.
@@ -50,10 +52,23 @@ pub fn shutdown() void {
     nic = null;
 }
 pub fn isAvailable() bool {
-    return available;
+    return available and (if (wireless) |link| link.connected(link.context) else true);
+}
+/// An explicit trusted static IPv4 configuration. A radio link never invents a
+/// DHCP lease, gateway or route. Existing wired endpoints cannot be replaced.
+pub fn attachWireless(config: core.Config, transport: core.Transport, context: *anyopaque, connected: *const fn (*anyopaque) bool) !void {
+    if (nic != null or wireless != null or stack.initialized) return error.AlreadyInitialized;
+    try stack.init(config, transport);
+    wireless = .{ .context = context, .connected = connected };
+    initialized = true;
+    available = true;
+}
+pub fn ingestWireless(_: *anyopaque, frame: []const u8) void {
+    if (wireless == null or !isAvailable()) return;
+    stack.ingest(frame);
 }
 pub fn poll() void {
-    if (!available) return;
+    if (!isAvailable() or wireless != null) return;
     for (0..16) |_| {
         const length = (nic.?.receive(&receive_buffer) catch |err| {
             if (err == error.OutputTooSmall) continue;
@@ -71,7 +86,7 @@ pub fn poll() void {
     }
 }
 fn ready() !void {
-    if (!available) return error.NetworkUnavailable;
+    if (!isAvailable()) return error.NetworkUnavailable;
 }
 pub fn open(peer: networkkit.Endpoint) !u64 {
     try ready();

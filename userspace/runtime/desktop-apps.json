@@ -1,0 +1,9 @@
+{
+  "format": "bedrock-apps-v1",
+  "apps": [
+    { "id": 101, "name": "org.bedrock.init", "version": 1, "entry": "/bundle/main.elf" },
+    { "id": 104, "name": "org.bedrock.display-server", "version": 1, "entry": "/bundle/main.elf" },
+    { "id": 107, "name": "org.bedrock.shell", "version": 1, "entry": "/bundle/main.elf" },
+    { "id": 2, "name": "org.bedrock.files", "version": 1, "entry": "/bundle/main.elf" }
+  ]
+}
